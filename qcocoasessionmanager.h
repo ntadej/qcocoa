@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (C) 2016 The Qt Company Ltd.
+** Copyright (C) 2019 Samuel Gaist <samuel.gaist@idiap.ch>
 ** Contact: https://www.qt.io/licensing/
 **
 ** This file is part of the plugins of the Qt Toolkit.
@@ -37,44 +37,45 @@
 **
 ****************************************************************************/
 
-#ifndef QNSVIEW_H
-#define QNSVIEW_H
+#ifndef QCOCOASESSIONMANAGER_H
+#define QCOCOASESSIONMANAGER_H
 
-#include <AppKit/AppKit.h>
-#include <MetalKit/MetalKit.h>
+//
+//  W A R N I N G
+//  -------------
+//
+// This file is part of the QPA API and is not meant to be used
+// in applications. Usage of this API may make your code
+// source and binary incompatible with future versions of Qt.
+//
 
-#include <QtCore/private/qcore_mac_p.h>
+#ifndef QT_NO_SESSIONMANAGER
+
+#include <qpa/qplatformsessionmanager.h>
 
 QT_BEGIN_NAMESPACE
-class QCocoaWindow;
-class QCocoaGLContext;
-class QPointF;
+
+class QCocoaSessionManager : public QPlatformSessionManager
+{
+public:
+    QCocoaSessionManager(const QString &id, const QString &key);
+    virtual ~QCocoaSessionManager();
+
+    bool allowsInteraction() override;
+    void cancel() override;
+    void resetCancellation();
+    bool wasCanceled() const;
+
+    static QCocoaSessionManager *instance();
+
+private:
+    bool m_canceled;
+
+    Q_DISABLE_COPY(QCocoaSessionManager)
+};
+
 QT_END_NAMESPACE
 
-@interface QT_MANGLE_NAMESPACE(QNSView) : NSView
-@property (nonatomic, retain) NSCursor *cursor;
-- (instancetype)initWithCocoaWindow:(QCocoaWindow *)platformWindow;
-- (void)convertFromScreen:(NSPoint)mouseLocation toWindowPoint:(QPointF *)qtWindowPoint andScreenPoint:(QPointF *)qtScreenPoint;
-@end
+#endif // QT_NO_SESSIONMANAGER
 
-QT_NAMESPACE_ALIAS_OBJC_CLASS(QNSView);
-
-@interface QNSView (MouseAPI)
-- (void)handleFrameStrutMouseEvent:(NSEvent *)theEvent;
-- (void)resetMouseButtons;
-@end
-
-@interface QNSView (KeysAPI)
-+ (Qt::KeyboardModifiers)convertKeyModifiers:(ulong)modifierFlags;
-@end
-
-@interface QNSView (ComplexTextAPI)
-- (void)unmarkText;
-- (void)cancelComposingText;
-@end
-
-@interface QNSView (QtExtras)
-@property (nonatomic, readonly) QCocoaWindow *platformWindow;
-@end
-
-#endif //QNSVIEW_H
+#endif // QCOCOASESSIONMANAGER_H
