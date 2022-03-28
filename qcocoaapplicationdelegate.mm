@@ -184,8 +184,6 @@ QT_USE_NAMESPACE
 
 - (void)applicationWillFinishLaunching:(NSNotification *)notification
 {
-    Q_UNUSED(notification);
-
     /*
         From the Cocoa documentation: "A good place to install event handlers
         is in the applicationWillFinishLaunching: method of the application
@@ -205,6 +203,9 @@ QT_USE_NAMESPACE
                       andSelector:@selector(getUrl:withReplyEvent:)
                     forEventClass:kInternetEventClass
                        andEventID:kAEGetURL];
+
+    if ([reflectionDelegate respondsToSelector:_cmd])
+        [reflectionDelegate applicationWillFinishLaunching:notification];
 }
 
 // called by QCocoaIntegration's destructor before resetting the application delegate to nil
@@ -219,9 +220,8 @@ QT_USE_NAMESPACE
     return inLaunch;
 }
 
-- (void)applicationDidFinishLaunching:(NSNotification *)aNotification
+- (void)applicationDidFinishLaunching:(NSNotification *)notification
 {
-    Q_UNUSED(aNotification);
     inLaunch = false;
 
     if (qEnvironmentVariableIsEmpty("QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM")) {
@@ -233,6 +233,9 @@ QT_USE_NAMESPACE
     }
 
     QCocoaMenuBar::insertWindowMenu();
+
+    if ([reflectionDelegate respondsToSelector:_cmd])
+        [reflectionDelegate applicationDidFinishLaunching:notification];
 }
 
 - (void)application:(NSApplication *)sender openFiles:(NSArray *)filenames
@@ -313,6 +316,24 @@ QT_USE_NAMESPACE
     QWindowSystemInterface::handleApplicationStateChanged(Qt::ApplicationActive, true /*forcePropagate*/);
 
     return YES;
+}
+
+- (void)application:(NSApplication *)application didReceiveRemoteNotification:(NSDictionary *)userInfo
+{
+    if ([reflectionDelegate respondsToSelector:_cmd])
+        return [reflectionDelegate application:application didReceiveRemoteNotification:userInfo];
+}
+
+- (void)application:(NSApplication *)application didRegisterForRemoteNotificationsWithDeviceToken:(NSData *)deviceToken
+{
+    if ([reflectionDelegate respondsToSelector:_cmd])
+        return [reflectionDelegate application:application didRegisterForRemoteNotificationsWithDeviceToken:deviceToken];
+}
+
+- (void)application:(NSApplication *)application didFailToRegisterForRemoteNotificationsWithError:(NSError *)error
+{
+    if ([reflectionDelegate respondsToSelector:_cmd])
+        return [reflectionDelegate application:application didFailToRegisterForRemoteNotificationsWithError:error];
 }
 
 - (void)setReflectionDelegate:(NSObject <NSApplicationDelegate> *)oldDelegate

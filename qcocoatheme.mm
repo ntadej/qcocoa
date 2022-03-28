@@ -138,7 +138,11 @@ static QPalette *qt_mac_createSystemPalette()
 
     palette->setBrush(QPalette::ToolTipBase, qt_mac_toQBrush([NSColor controlColor]));
 
-    palette->setColor(QPalette::Normal, QPalette::Link, qt_mac_toQColor([NSColor linkColor]));
+    if (__builtin_available(macOS 10.14, *)) {
+        palette->setColor(QPalette::Normal, QPalette::Link, qt_mac_toQColor([NSColor controlAccentColor]));
+    } else {
+        palette->setColor(QPalette::Normal, QPalette::Link, qt_mac_toQColor([NSColor linkColor]));
+    }
 
     qc = qt_mac_toQColor([NSColor placeholderTextColor]);
     palette->setColor(QPalette::Active, QPalette::PlaceholderText, qc);
