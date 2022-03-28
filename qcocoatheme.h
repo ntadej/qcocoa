@@ -73,6 +73,7 @@ public:
     QIcon fileIcon(const QFileInfo &fileInfo, QPlatformTheme::IconOptions options = {}) const override;
 
     QVariant themeHint(ThemeHint hint) const override;
+    Appearance appearance() const override;
     QString standardButtonText(int button) const override;
     QKeySequence standardButtonShortcut(int button) const override;
 
@@ -80,11 +81,14 @@ public:
 
     void handleSystemThemeChange();
 
+#ifndef QT_NO_SHORTCUT
+    QList<QKeySequence> keyBindings(QKeySequence::StandardKey key) const override;
+#endif
+
 private:
     mutable QPalette *m_systemPalette;
     QMacNotificationObserver m_systemColorObserver;
     mutable QHash<QPlatformTheme::Palette, QPalette*> m_palettes;
-    mutable QHash<QPlatformTheme::Font, QFont*> m_fonts;
     QMacKeyValueObserver m_appearanceObserver;
 };
 

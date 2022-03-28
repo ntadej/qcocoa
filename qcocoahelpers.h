@@ -51,8 +51,6 @@
 // We mean it.
 //
 
-#include <AppKit/AppKit.h>
-
 #include <private/qguiapplication_p.h>
 #include <QtCore/qloggingcategory.h>
 #include <QtGui/qpalette.h>
@@ -61,6 +59,8 @@
 
 #include <objc/runtime.h>
 #include <objc/message.h>
+
+#if defined(__OBJC__)
 
 Q_FORWARD_DECLARE_OBJC_CLASS(QT_MANGLE_NAMESPACE(QNSView));
 
@@ -71,7 +71,12 @@ QT_BEGIN_NAMESPACE
 Q_DECLARE_LOGGING_CATEGORY(lcQpaWindow)
 Q_DECLARE_LOGGING_CATEGORY(lcQpaDrawing)
 Q_DECLARE_LOGGING_CATEGORY(lcQpaMouse)
+Q_DECLARE_LOGGING_CATEGORY(lcQpaKeys)
+Q_DECLARE_LOGGING_CATEGORY(lcQpaInputMethods)
 Q_DECLARE_LOGGING_CATEGORY(lcQpaScreen)
+Q_DECLARE_LOGGING_CATEGORY(lcQpaApplication)
+Q_DECLARE_LOGGING_CATEGORY(lcQpaClipboard)
+Q_DECLARE_LOGGING_CATEGORY(lcInputDevices)
 
 class QPixmap;
 class QString;
@@ -221,19 +226,6 @@ QT_NAMESPACE_ALIAS_OBJC_CLASS(QNSPanelContentsWrapper);
 
 // -------------------------------------------------------------------------
 
-// QAppleRefCounted expects the retain function to return the object
-io_object_t q_IOObjectRetain(io_object_t obj);
-// QAppleRefCounted expects the release function to return void
-void q_IOObjectRelease(io_object_t obj);
-
-template <typename T>
-class QIOType : public QAppleRefCounted<T, io_object_t, q_IOObjectRetain, q_IOObjectRelease>
-{
-    using QAppleRefCounted<T, io_object_t, q_IOObjectRetain, q_IOObjectRelease>::QAppleRefCounted;
-};
-
-// -------------------------------------------------------------------------
-
 // Depending on the ABI of the platform, we may need to use objc_msgSendSuper_stret:
 // - http://www.sealiesoftware.com/blog/archive/2008/10/30/objc_explain_objc_msgSend_stret.html
 // - https://lists.apple.com/archives/cocoa-dev/2008/Feb/msg02338.html
@@ -354,6 +346,47 @@ QSendSuperHelper<Args...> qt_objcDynamicSuperHelper(id receiver, SEL selector, A
 
 // Same as calling super, but the super_class field resolved at runtime instead of compile time
 #define qt_objcDynamicSuper(...) qt_objcDynamicSuperHelper(self, _cmd, ##__VA_ARGS__)
+
+// -------------------------------------------------------------------------
+
+struct InputMethodQueryResult : public QHash<Qt::InputMethodQuery, QVariant>
+{
+    operator bool() { return !isEmpty(); }
+};
+
+InputMethodQueryResult queryInputMethod(QObject *object, Qt::InputMethodQueries queries = Qt::ImEnabled);
+
+// -------------------------------------------------------------------------
+
+struct KeyEvent
+{
+    ulong timestamp = 0;
+    QEvent::Type type = QEvent::None;
+
+    Qt::Key key = Qt::Key_unknown;
+    Qt::KeyboardModifiers modifiers = Qt::NoModifier;
+    QString text;
+    bool isRepeat = false;
+
+    // Scan codes are hardware dependent codes for each key. There is no way to get these
+    // from Carbon or Cocoa, so leave it 0, as documented in QKeyEvent::nativeScanCode().
+    static const quint32 nativeScanCode = 0;
+
+    quint32 nativeVirtualKey = 0;
+    NSEventModifierFlags nativeModifiers = 0;
+
+    KeyEvent(NSEvent *nsevent);
+    bool sendWindowSystemEvent(QWindow *window) const;
+};
+
+QDebug operator<<(QDebug debug, const KeyEvent &e);
+
+// -------------------------------------------------------------------------
+
+QDebug operator<<(QDebug, const NSRange &);
+QDebug operator<<(QDebug, SEL);
+
+#endif // __OBJC__
 
 #endif //QCOCOAHELPERS_H
 

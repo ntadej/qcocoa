@@ -36,6 +36,9 @@
 ** $QT_END_LICENSE$
 **
 ****************************************************************************/
+
+#include <AppKit/AppKit.h>
+
 #include "qcocoaaccessibility.h"
 #include "qcocoaaccessibilityelement.h"
 #include <QtGui/qaccessible.h>
@@ -91,7 +94,7 @@ void QCocoaAccessibility::notifyAccessibilityUpdate(QAccessibleEvent *event)
 
 void QCocoaAccessibility::setRootObject(QObject *o)
 {
-    Q_UNUSED(o)
+    Q_UNUSED(o);
 }
 
 void QCocoaAccessibility::initialize()

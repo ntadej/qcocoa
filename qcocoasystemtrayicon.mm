@@ -72,6 +72,8 @@
 **
 ****************************************************************************/
 
+#include <AppKit/AppKit.h>
+
 #include "qcocoasystemtrayicon.h"
 
 #ifndef QT_NO_SYSTEMTRAYICON
@@ -83,25 +85,23 @@
 #include <QtCore/private/qcore_mac_p.h>
 
 #include "qcocoamenu.h"
+#include "qcocoansmenu.h"
 
 #include "qcocoahelpers.h"
 #include "qcocoaintegration.h"
 #include "qcocoascreen.h"
 #include <QtGui/private/qcoregraphics_p.h>
 
-#import <AppKit/AppKit.h>
-
 QT_BEGIN_NAMESPACE
 
 void QCocoaSystemTrayIcon::init()
 {
-    m_statusItem = [[NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength] retain];
+    m_statusItem = [[NSStatusBar.systemStatusBar statusItemWithLength:NSSquareStatusItemLength] retain];
 
     m_delegate = [[QStatusItemDelegate alloc] initWithSysTray:this];
 
     m_statusItem.button.target = m_delegate;
     m_statusItem.button.action = @selector(statusItemClicked);
-    m_statusItem.button.imagePosition = NSImageRight;
     [m_statusItem.button sendActionOn:NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown | NSEventMaskOtherMouseDown];
 }
 
@@ -151,7 +151,7 @@ void QCocoaSystemTrayIcon::updateIcon(const QIcon &icon)
     // (device independent pixels). The menu height on past and
     // current OS X versions is 22 points. Provide some future-proofing
     // by deriving the icon height from the menu height.
-    const int padding = 2;
+    const int padding = 4;
     const int menuHeight = NSStatusBar.systemStatusBar.thickness;
     const int maxImageHeight = menuHeight - padding;
 
@@ -227,7 +227,7 @@ void QCocoaSystemTrayIcon::updateToolTip(const QString &toolTip)
     if (!m_statusItem)
         return;
 
-    m_statusItem.button.title = toolTip.toNSString();
+    m_statusItem.button.toolTip = toolTip.toNSString();
 }
 
 bool QCocoaSystemTrayIcon::isSystemTrayAvailable() const
@@ -282,10 +282,8 @@ void QCocoaSystemTrayIcon::statusItemClicked()
 
     emit activated(activationReason);
 
-    if (activationReason == QPlatformSystemTrayIcon::Context) {
-        if (NSMenu *menu = m_menu ? m_menu->nsMenu() : nil)
-            [m_statusItem popUpStatusItemMenu:menu];
-    }
+    if (NSMenu *menu = m_menu ? m_menu->nsMenu() : nil)
+        QT_IGNORE_DEPRECATIONS([m_statusItem popUpStatusItemMenu:menu]);
 }
 
 QT_END_NAMESPACE

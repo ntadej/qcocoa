@@ -71,13 +71,16 @@
  **
  ****************************************************************************/
 
+#include <AppKit/AppKit.h>
 
-#import "qcocoaapplicationdelegate.h"
+#include "qcocoaapplicationdelegate.h"
 #include "qcocoaintegration.h"
+#include "qcocoamenubar.h"
 #include "qcocoamenu.h"
 #include "qcocoamenuloader.h"
 #include "qcocoamenuitem.h"
 #include "qcocoansmenu.h"
+#include "qcocoahelpers.h"
 
 #if QT_CONFIG(sessionmanager)
 #  include "qcocoasessionmanager.h"
@@ -89,10 +92,6 @@
 #include <qguiapplication.h>
 #include <qpa/qwindowsysteminterface.h>
 #include <qwindowdefs.h>
-
-QT_BEGIN_NAMESPACE
-Q_LOGGING_CATEGORY(lcQpaApplication, "qt.qpa.application");
-QT_END_NAMESPACE
 
 QT_USE_NAMESPACE
 
@@ -185,6 +184,8 @@ QT_USE_NAMESPACE
 
 - (void)applicationWillFinishLaunching:(NSNotification *)notification
 {
+    Q_UNUSED(notification);
+
     /*
         From the Cocoa documentation: "A good place to install event handlers
         is in the applicationWillFinishLaunching: method of the application
@@ -204,9 +205,6 @@ QT_USE_NAMESPACE
                       andSelector:@selector(getUrl:withReplyEvent:)
                     forEventClass:kInternetEventClass
                        andEventID:kAEGetURL];
-
-    if ([reflectionDelegate respondsToSelector:_cmd])
-        [reflectionDelegate applicationWillFinishLaunching:notification];
 }
 
 // called by QCocoaIntegration's destructor before resetting the application delegate to nil
@@ -221,8 +219,9 @@ QT_USE_NAMESPACE
     return inLaunch;
 }
 
-- (void)applicationDidFinishLaunching:(NSNotification *)notification
+- (void)applicationDidFinishLaunching:(NSNotification *)aNotification
 {
+    Q_UNUSED(aNotification);
     inLaunch = false;
 
     if (qEnvironmentVariableIsEmpty("QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM")) {
@@ -233,8 +232,7 @@ QT_USE_NAMESPACE
         [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
     }
 
-    if ([reflectionDelegate respondsToSelector:_cmd])
-        [reflectionDelegate applicationDidFinishLaunching:notification];
+    QCocoaMenuBar::insertWindowMenu();
 }
 
 - (void)application:(NSApplication *)sender openFiles:(NSArray *)filenames
@@ -274,6 +272,16 @@ QT_USE_NAMESPACE
         [reflectionDelegate applicationDidBecomeActive:notification];
 
     QWindowSystemInterface::handleApplicationStateChanged(Qt::ApplicationActive);
+
+    if (QCocoaWindow::s_windowUnderMouse) {
+        QPointF windowPoint;
+        QPointF screenPoint;
+        QNSView *view = qnsview_cast(QCocoaWindow::s_windowUnderMouse->m_view);
+        [view convertFromScreen:[NSEvent mouseLocation] toWindowPoint:&windowPoint andScreenPoint:&screenPoint];
+        QWindow *windowUnderMouse = QCocoaWindow::s_windowUnderMouse->window();
+        qCInfo(lcQpaMouse) << "Application activated with mouse at" << windowPoint << "; sending" << QEvent::Enter << "to" << windowUnderMouse;
+        QWindowSystemInterface::handleEnterEvent(windowUnderMouse, windowPoint, screenPoint);
+    }
 }
 
 - (void)applicationDidResignActive:(NSNotification *)notification
@@ -282,6 +290,12 @@ QT_USE_NAMESPACE
         [reflectionDelegate applicationDidResignActive:notification];
 
     QWindowSystemInterface::handleApplicationStateChanged(Qt::ApplicationInactive);
+
+    if (QCocoaWindow::s_windowUnderMouse) {
+        QWindow *windowUnderMouse = QCocoaWindow::s_windowUnderMouse->window();
+        qCInfo(lcQpaMouse) << "Application deactivated; sending" << QEvent::Leave << "to" << windowUnderMouse;
+        QWindowSystemInterface::handleLeaveEvent(windowUnderMouse);
+    }
 }
 
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)theApplication hasVisibleWindows:(BOOL)flag
@@ -299,24 +313,6 @@ QT_USE_NAMESPACE
     QWindowSystemInterface::handleApplicationStateChanged(Qt::ApplicationActive, true /*forcePropagate*/);
 
     return YES;
-}
-
-- (void)application:(NSApplication *)application didReceiveRemoteNotification:(NSDictionary *)userInfo
-{
-    if ([reflectionDelegate respondsToSelector:_cmd])
-        return [reflectionDelegate application:application didReceiveRemoteNotification:userInfo];
-}
-
-- (void)application:(NSApplication *)application didRegisterForRemoteNotificationsWithDeviceToken:(NSData *)deviceToken
-{
-    if ([reflectionDelegate respondsToSelector:_cmd])
-        return [reflectionDelegate application:application didRegisterForRemoteNotificationsWithDeviceToken:deviceToken];
-}
-
-- (void)application:(NSApplication *)application didFailToRegisterForRemoteNotificationsWithError:(NSError *)error
-{
-    if ([reflectionDelegate respondsToSelector:_cmd])
-        return [reflectionDelegate application:application didFailToRegisterForRemoteNotificationsWithError:error];
 }
 
 - (void)setReflectionDelegate:(NSObject <NSApplicationDelegate> *)oldDelegate
@@ -366,7 +362,7 @@ QT_USE_NAMESPACE
         return item.enabled; // FIXME Test with with Qt as plugin or embedded QWindow.
 
     auto *platformItem = nativeItem.platformMenuItem;
-    if (!platformItem) // Try a bit harder with orphan menu itens
+    if (!platformItem) // Try a bit harder with orphan menu items
         return item.hasSubmenu || (item.enabled && (item.action != @selector(qt_itemFired:)));
 
     // Menu-holding items are always enabled, as it's conventional in Cocoa
@@ -394,7 +390,7 @@ QT_USE_NAMESPACE
         return;
 
     QScopedScopeLevelCounter scopeLevelCounter(QGuiApplicationPrivate::instance()->threadData.loadRelaxed());
-    QGuiApplicationPrivate::modifier_buttons = [QNSView convertKeyModifiers:[NSEvent modifierFlags]];
+    QGuiApplicationPrivate::modifier_buttons = QAppleKeyMapper::fromCocoaModifiers([NSEvent modifierFlags]);
 
     static QMetaMethod activatedSignal = QMetaMethod::fromSignal(&QCocoaMenuItem::activated);
     activatedSignal.invoke(platformItem, Qt::QueuedConnection);
