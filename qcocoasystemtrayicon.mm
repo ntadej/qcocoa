@@ -283,8 +283,10 @@ void QCocoaSystemTrayIcon::statusItemClicked()
 
     emit activated(activationReason);
 
-    if (NSMenu *menu = m_menu ? m_menu->nsMenu() : nil)
-        QT_IGNORE_DEPRECATIONS([m_statusItem popUpStatusItemMenu:menu]);
+    if (activationReason == QPlatformSystemTrayIcon::Context) {
+        if (NSMenu *menu = m_menu ? m_menu->nsMenu() : nil)
+            QT_IGNORE_DEPRECATIONS([m_statusItem popUpStatusItemMenu:menu]);
+    }
 }
 
 QT_END_NAMESPACE
