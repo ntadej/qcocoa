@@ -108,6 +108,18 @@ void QCocoaScreen::initializeScreens()
 */
 void QCocoaScreen::updateScreens()
 {
+    // Adding, updating, or removing a screen below might trigger
+    // Qt or the application to move a window to a different screen,
+    // recursing back here via QCocoaWindow::windowDidChangeScreen.
+    // The update code is not re-entrant, so bail out if we end up
+    // in this situation. The screens will stabilize eventually.
+    static bool updatingScreens = false;
+    if (updatingScreens) {
+        qCInfo(lcQpaScreen) << "Skipping screen update, already updating";
+        return;
+    }
+    QBoolBlocker recursionGuard(updatingScreens);
+
     uint32_t displayCount = 0;
     if (CGGetOnlineDisplayList(0, nullptr, &displayCount) != kCGErrorSuccess)
         qFatal("Failed to get number of online displays");
@@ -293,7 +305,10 @@ void QCocoaScreen::update(CGDirectDisplayID displayId)
     float refresh = CGDisplayModeGetRefreshRate(displayMode);
     m_refreshRate = refresh > 0 ? refresh : 60.0;
 
-    m_name = displayName(m_displayId);
+    if (@available(macOS 10.15, *))
+        m_name = QString::fromNSString(nsScreen.localizedName);
+    else
+        m_name = displayName(m_displayId);
 
     const bool didChangeGeometry = m_geometry != previousGeometry || m_availableGeometry != previousAvailableGeometry;
 
@@ -310,6 +325,11 @@ Q_LOGGING_CATEGORY(lcQpaScreenUpdates, "qt.qpa.screen.updates", QtCriticalMsg);
 void QCocoaScreen::requestUpdate()
 {
     Q_ASSERT(m_displayId);
+
+    if (!isOnline()) {
+        qCDebug(lcQpaScreenUpdates) << this << "is not online. Ignoring update request";
+        return;
+    }
 
     if (!m_displayLink) {
         CVDisplayLinkCreateWithCGDisplay(m_displayId, &m_displayLink);
