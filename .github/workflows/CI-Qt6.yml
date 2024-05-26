@@ -131,6 +131,6 @@ jobs:
     - name: Release
       uses: ncipollo/release-action@v1
       with:
-        artifacts: qcocoa_*_${{ github.ref_name }}.tar.bz2
+        artifacts: qcocoa_*${{ github.ref_name }}.tar.bz2
         allowUpdates: true
         draft: true
