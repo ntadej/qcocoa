@@ -24,16 +24,19 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  QT_VERSION: 6.4.3
+  QT_VERSION: 6.7.1
 
 jobs:
   build:
     name: Build qcocoa
-    runs-on: macos-12
+    runs-on: macos-14
+    strategy:
+      matrix:
+        type: [shared, static]
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           path: source
           fetch-depth: 0
@@ -43,19 +46,36 @@ jobs:
         with:
           xcode-version: latest-stable
 
-      - name: Download Qt (desktop)
-        uses: jurplel/install-qt-action@v3
+      - name: Download Qt
+        if: matrix.type == 'shared'
+        uses: jurplel/install-qt-action@v4
         with:
-          aqtversion: ==3.0.*
+          aqtversion: ==3.1.*
           version: ${{ env.QT_VERSION }}
           target: desktop
 
-      - name: Prepare Qt (desktop)
+      - name: Download Static Qt
+        if: matrix.type == 'static'
         run: |
-          rm $Qt6_DIR/lib/cmake/Qt6Gui/Qt6QCocoaIntegrationPlugin*
+          cd ..
+          wget https://github.com/ntadej/qt-build/releases/download/v${QT_VERSION}.0/Qt_macOS_static.tar.bz2
+          tar xvf Qt_macOS_static.tar.bz2
+          echo "QT_ROOT_DIR=$PWD/Qt/$QT_VERSION/macos_static" >> $GITHUB_ENV
+          echo "$PWD/Qt/$QT_VERSION/macos_static/bin" >> $GITHUB_PATH
+          cd $GITHUB_WORKSPACE
+
+      - name: Prepare Qt
+        run: |
+          rm $QT_ROOT_DIR/lib/cmake/Qt6Gui/Qt6QCocoaIntegrationPlugin*
 
       - name: Setup ninja
-        uses: seanmiddleditch/gha-setup-ninja@v3
+        uses: seanmiddleditch/gha-setup-ninja@v4
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: ${{ matrix.type }}
+          max-size: 200M
 
       - name: Build qcocoa
         run: |
@@ -64,7 +84,7 @@ jobs:
             -G Ninja \
             -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
             -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.14
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
           ninja
           DESTDIR=../install ninja install
 
@@ -75,34 +95,42 @@ jobs:
           popd
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: qcocoa
+          name: qcocoa_${{ matrix.type }}
           path: qcocoa.tar.bz2
 
   release:
     name: Release qcocoa
     if: github.ref_type == 'tag'
-    runs-on: macos-12
+    runs-on: macos-14
+    strategy:
+      matrix:
+        type: [shared, static]
     needs: build
     permissions:
       contents: write
 
     steps:
     - name: Download artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
-        name: qcocoa
+        name: qcocoa_${{ matrix.type }}
 
     - name: Make tarball
       env:
         TAG_NAME: ${{ github.ref_name }}
+        BUILD_TYPE: ${{ matrix.type }}
       run: |
-        mv qcocoa.tar.bz2 qcocoa_${TAG_NAME}.tar.bz2
+        if [[ $BUILD_TYPE == 'static' ]]; then
+          mv qcocoa.tar.bz2 qcocoa_static_${TAG_NAME}.tar.bz2
+        else
+          mv qcocoa.tar.bz2 qcocoa_${TAG_NAME}.tar.bz2
+        fi
 
     - name: Release
       uses: ncipollo/release-action@v1
       with:
-        artifacts: qcocoa_${{ github.ref_name }}.tar.bz2
+        artifacts: qcocoa_*_${{ github.ref_name }}.tar.bz2
         allowUpdates: true
         draft: true

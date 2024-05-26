@@ -56,6 +56,12 @@
 #include "qcocoascreen.h"
 #include <QtGui/private/qcoregraphics_p.h>
 
+#warning NSUserNotification was deprecated in macOS 11. \
+We should be using UserNotifications.framework instead. \
+See QTBUG-110998 for more information.
+#define NSUserNotificationCenter QT_IGNORE_DEPRECATIONS(NSUserNotificationCenter)
+#define NSUserNotification QT_IGNORE_DEPRECATIONS(NSUserNotification)
+
 QT_BEGIN_NAMESPACE
 
 void QCocoaSystemTrayIcon::init()
@@ -179,7 +185,18 @@ void QCocoaSystemTrayIcon::updateIcon(const QIcon &icon)
 
 void QCocoaSystemTrayIcon::updateMenu(QPlatformMenu *menu)
 {
-    m_statusItem.menu = menu ? static_cast<QCocoaMenu *>(menu)->nsMenu() : nil;
+    auto *nsMenu = menu ? static_cast<QCocoaMenu *>(menu)->nsMenu() : nil;
+    if (m_statusItem.menu == nsMenu)
+        return;
+
+    if (m_statusItem.menu) {
+        [NSNotificationCenter.defaultCenter removeObserver:m_delegate
+            name:NSMenuDidBeginTrackingNotification
+            object:m_statusItem.menu
+        ];
+    }
+
+    m_statusItem.menu = nsMenu;
 
     if (m_statusItem.menu) {
         // When a menu is assigned, NSStatusBarButtonCell will intercept the mouse

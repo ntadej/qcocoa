@@ -148,6 +148,9 @@ QT_USE_NAMESPACE
 
 - (void)applicationWillFinishLaunching:(NSNotification *)notification
 {
+    if ([reflectionDelegate respondsToSelector:_cmd])
+        [reflectionDelegate applicationWillFinishLaunching:notification];
+
     /*
         From the Cocoa documentation: "A good place to install event handlers
         is in the applicationWillFinishLaunching: method of the application
@@ -167,9 +170,6 @@ QT_USE_NAMESPACE
                       andSelector:@selector(getUrl:withReplyEvent:)
                     forEventClass:kInternetEventClass
                        andEventID:kAEGetURL];
-
-    if ([reflectionDelegate respondsToSelector:_cmd])
-        [reflectionDelegate applicationWillFinishLaunching:notification];
 }
 
 // called by QCocoaIntegration's destructor before resetting the application delegate to nil
@@ -184,22 +184,39 @@ QT_USE_NAMESPACE
     return inLaunch;
 }
 
-- (void)applicationDidFinishLaunching:(NSNotification *)notification
+- (void)applicationDidFinishLaunching:(NSNotification *)aNotification
 {
+    if ([reflectionDelegate respondsToSelector:_cmd])
+        [reflectionDelegate applicationDidFinishLaunching:aNotification];
+
     inLaunch = false;
 
     if (qEnvironmentVariableIsEmpty("QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM")) {
-        // Move the application window to front to avoid launching behind the terminal.
-        // Ignoring other apps is necessary (we must ignore the terminal), but makes
-        // Qt apps play slightly less nice with other apps when lanching from Finder
-        // (See the activateIgnoringOtherApps docs.)
-        [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+        auto frontmostApplication = NSWorkspace.sharedWorkspace.frontmostApplication;
+        auto currentApplication = NSRunningApplication.currentApplication;
+        if (frontmostApplication != currentApplication) {
+            // Move the application to front to avoid launching behind the terminal.
+            // Ignoring other apps is necessary (we must ignore the terminal), but makes
+            // Qt apps play slightly less nice with other apps when launching from Finder
+            // (see the activateIgnoringOtherApps docs). FIXME: Try to distinguish between
+            // being non-active here because another application stole activation in the
+            // time it took us to launch from Finder, and being non-active because we were
+            // launched from Terminal or something that doesn't activate us at all.
+            qCDebug(lcQpaApplication) << "Launched with" << frontmostApplication
+                << "as frontmost application. Activating" << currentApplication << "instead.";
+            [NSApplication.sharedApplication activateIgnoringOtherApps:YES];
+        }
+
+        // Qt windows are typically shown in main(), at which point the application
+        // is not active yet. When the application is activated, either externally
+        // or via the override above, it will only bring the main and key windows
+        // forward, which differs from the behavior if these windows had been shown
+        // once the application was already active. To work around this, we explicitly
+        // activate the current application again, bringing all windows to the front.
+        [currentApplication activateWithOptions:NSApplicationActivateAllWindows];
     }
 
     QCocoaMenuBar::insertWindowMenu();
-
-    if ([reflectionDelegate respondsToSelector:_cmd])
-        [reflectionDelegate applicationDidFinishLaunching:notification];
 }
 
 - (void)application:(NSApplication *)sender openFiles:(NSArray *)filenames
@@ -339,14 +356,42 @@ QT_USE_NAMESPACE
 {
     Q_UNUSED(replyEvent);
     NSString *urlString = [[event paramDescriptorForKeyword:keyDirectObject] stringValue];
-    QWindowSystemInterface::handleFileOpenEvent(QUrl(QString::fromNSString(urlString)));
+    // The string we get from the requesting application might not necessarily meet
+    // QUrl's requirement for a IDN-compliant host. So if we can't parse into a QUrl,
+    // then we pass the string on to the application as the name of a file (and
+    // QFileOpenEvent::file is not guaranteed to be the path to a local, open'able
+    // file anyway).
+    const QString qurlString = QString::fromNSString(urlString);
+    if (const QUrl url(qurlString); url.isValid())
+        QWindowSystemInterface::handleFileOpenEvent(url);
+    else
+        QWindowSystemInterface::handleFileOpenEvent(qurlString);
 }
+
+- (BOOL)applicationSupportsSecureRestorableState:(NSApplication *)application
+{
+    if (@available(macOS 12, *)) {
+        if ([reflectionDelegate respondsToSelector:_cmd])
+            return [reflectionDelegate applicationSupportsSecureRestorableState:application];
+    }
+
+    // We don't support or implement state restorations via the AppKit
+    // state restoration APIs, but if we did, we would/should support
+    // secure state restoration. This is the default for apps linked
+    // against the macOS 14 SDK, but as we target versions below that
+    // as well we need to return YES here explicitly to silence a runtime
+    // warning.
+    return YES;
+}
+
 @end
 
 @implementation QCocoaApplicationDelegate (Menus)
 
 - (BOOL)validateMenuItem:(NSMenuItem*)item
 {
+    qCDebug(lcQpaMenus) << "Validating" << item << "for" << self;
+
     auto *nativeItem = qt_objc_cast<QCocoaNSMenuItem *>(item);
     if (!nativeItem)
         return item.enabled; // FIXME Test with with Qt as plugin or embedded QWindow.
@@ -368,6 +413,8 @@ QT_USE_NAMESPACE
 
 - (void)qt_itemFired:(QCocoaNSMenuItem *)item
 {
+    qCDebug(lcQpaMenus) << "Activating" << item;
+
     if (item.hasSubmenu)
         return;
 

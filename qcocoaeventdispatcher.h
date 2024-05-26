@@ -55,16 +55,22 @@
 #include <QtCore/private/qabstracteventdispatcher_p.h>
 #include <QtCore/private/qcfsocketnotifier_p.h>
 #include <QtCore/private/qtimerinfo_unix_p.h>
+#include <QtCore/qloggingcategory.h>
+#include <QtCore/qpointer.h>
 
 #include <CoreFoundation/CoreFoundation.h>
 
+Q_FORWARD_DECLARE_OBJC_CLASS(NSWindow);
+
 QT_BEGIN_NAMESPACE
+
+Q_DECLARE_LOGGING_CATEGORY(lcEventDispatcher);
 
 typedef struct _NSModalSession *NSModalSession;
 typedef struct _QCocoaModalSessionInfo {
     QPointer<QWindow> window;
     NSModalSession session;
-    void *nswindow;
+    NSWindow *nswindow;
 } QCocoaModalSessionInfo;
 
 class QCocoaEventDispatcherPrivate;
@@ -126,6 +132,7 @@ public:
     QStack<QCocoaModalSessionInfo> cocoaModalSessionStack;
     bool currentExecIsNSAppRun;
     bool nsAppRunCalledByQt;
+    bool initializingNSApplication = false;
     bool cleanupModalSessionsNeeded;
     uint processEventsCalled;
     NSModalSession currentModalSessionCached;
@@ -144,7 +151,6 @@ public:
     QList<void *> queuedUserInputEvents; // NSEvent *
     CFRunLoopSourceRef postedEventsSource;
     CFRunLoopObserverRef waitingObserver;
-    CFRunLoopObserverRef firstTimeObserver;
     QAtomicInt serialNumber;
     int lastSerial;
     bool interrupt;
@@ -153,7 +159,6 @@ public:
     static void postedEventsSourceCallback(void *info);
     static void waitingObserverCallback(CFRunLoopObserverRef observer,
                                         CFRunLoopActivity activity, void *info);
-    static void firstLoopEntry(CFRunLoopObserverRef ref, CFRunLoopActivity activity, void *info);
     bool sendQueuedUserInputEvents();
     void processPostedEvents();
 };

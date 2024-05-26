@@ -4,26 +4,53 @@
 #include "qcocoaservices.h"
 
 #include <AppKit/NSWorkspace.h>
+#include <AppKit/NSColorSampler.h>
 #include <Foundation/NSURL.h>
 
 #include <QtCore/QUrl>
+#include <QtGui/private/qcoregraphics_p.h>
 
 QT_BEGIN_NAMESPACE
 
 bool QCocoaServices::openUrl(const QUrl &url)
 {
-    const QString scheme = url.scheme();
-    if (scheme.isEmpty())
-        return openDocument(url);
     return [[NSWorkspace sharedWorkspace] openURL:url.toNSURL()];
 }
 
 bool QCocoaServices::openDocument(const QUrl &url)
 {
-    if (!url.isValid())
-        return false;
+    return openUrl(url);
+}
 
-    return [[NSWorkspace sharedWorkspace] openFile:url.toLocalFile().toNSString()];
+class QCocoaColorPicker : public QPlatformServiceColorPicker
+{
+public:
+    QCocoaColorPicker() : m_colorSampler([NSColorSampler new]) {}
+    ~QCocoaColorPicker() { [m_colorSampler release]; }
+
+    void pickColor() override
+    {
+        [m_colorSampler showSamplerWithSelectionHandler:^(NSColor *selectedColor) {
+            emit colorPicked(qt_mac_toQColor(selectedColor));
+        }];
+    }
+private:
+    NSColorSampler *m_colorSampler = nullptr;
+};
+
+
+QPlatformServiceColorPicker *QCocoaServices::colorPicker(QWindow *parent)
+{
+    Q_UNUSED(parent);
+    return new QCocoaColorPicker;
+}
+
+bool QCocoaServices::hasCapability(Capability capability) const
+{
+    switch (capability) {
+    case ColorPicking: return true;
+    default: return false;
+    }
 }
 
 QT_END_NAMESPACE

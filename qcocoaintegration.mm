@@ -30,12 +30,18 @@
 #include <QtCore/qcoreapplication.h>
 #include <QtGui/qpointingdevice.h>
 
+#include <QtCore/private/qcore_mac_p.h>
 #include <QtGui/private/qcoregraphics_p.h>
-#include <QtGui/private/qopenglcontext_p.h>
+#include <QtGui/private/qmacmimeregistry_p.h>
+#ifndef QT_NO_OPENGL
+#  include <QtGui/private/qopenglcontext_p.h>
+#endif
 #include <QtGui/private/qrhibackingstore_p.h>
 #include <QtGui/private/qfontengine_coretext_p.h>
 
 #include <IOKit/graphics/IOGraphicsLib.h>
+
+#include <inttypes.h>
 
 static void initResources()
 {
@@ -135,16 +141,6 @@ QCocoaIntegration::QCocoaIntegration(const QStringList &paramList)
         // wants to be foreground applications so change the process type. (But
         // see the function implementation for exceptions.)
         qt_mac_transformProccessToForegroundApplication();
-
-        // Move the application window to front to make it take focus, also when launching
-        // from the terminal. On 10.12+ this call has been moved to applicationDidFinishLauching
-        // to work around issues with loss of focus at startup.
-        if (QOperatingSystemVersion::current() < QOperatingSystemVersion::MacOSSierra) {
-            // Ignoring other apps is necessary (we must ignore the terminal), but makes
-            // Qt apps play slightly less nice with other apps when lanching from Finder
-            // (See the activateIgnoringOtherApps docs.)
-            [cocoaApplication activateIgnoringOtherApps : YES];
-        }
     }
 
     // Qt 4 also does not set the application delegate, so that behavior
@@ -163,7 +159,7 @@ QCocoaIntegration::QCocoaIntegration(const QStringList &paramList)
 
     QCocoaScreen::initializeScreens();
 
-    QMacInternalPasteboardMime::initializeMimeTypes();
+    QMacMimeRegistry::initializeMimeTypes();
     QCocoaMimeTypes::initializeMimeTypes();
     QWindowSystemInterfacePrivate::TabletEvent::setPlatformSynthesizesMouse(false);
     QWindowSystemInterface::registerInputDevice(new QInputDevice(QString("keyboard"), 0,
@@ -188,17 +184,18 @@ QCocoaIntegration::~QCocoaIntegration()
         [[NSApplication sharedApplication] setDelegate:nil];
     }
 
+    // Stop global mouse event and app activation monitoring
+    QCocoaWindow::removePopupMonitor();
+
 #ifndef QT_NO_CLIPBOARD
     // Delete the clipboard integration and destroy mime type converters.
     // Deleting the clipboard integration flushes promised pastes using
     // the mime converters - the ordering here is important.
     delete mCocoaClipboard;
-    QMacInternalPasteboardMime::destroyMimeTypes();
+    QMacMimeRegistry::destroyMimeTypes();
 #endif
 
     QCocoaScreen::cleanupScreens();
-
-    clearToolbars();
 }
 
 QCocoaIntegration *QCocoaIntegration::instance()
@@ -238,6 +235,7 @@ bool QCocoaIntegration::hasCapability(QPlatformIntegration::Capability cap) cons
     case RasterGLSurface:
     case ApplicationState:
     case ApplicationIcon:
+    case BackingStoreStaticContents:
         return true;
     default:
         return QPlatformIntegration::hasCapability(cap);
@@ -305,6 +303,18 @@ QPlatformBackingStore *QCocoaIntegration::createPlatformBackingStore(QWindow *wi
         return new QCALayerBackingStore(window);
     case QSurface::MetalSurface:
     case QSurface::OpenGLSurface:
+    case QSurface::VulkanSurface:
+        // If the window is a widget window, we know that the QWidgetRepaintManager
+        // will explicitly use rhiFlush() for the window owning the backingstore,
+        // and any child window with the same surface format. This means we can
+        // safely return a QCALayerBackingStore here, to ensure that any plain
+        // flush() for child windows that don't have a matching surface format
+        // will still work, by setting the layer's contents property.
+        if (window->inherits("QWidgetWindow"))
+            return new QCALayerBackingStore(window);
+
+        // Otherwise we return a QRhiBackingStore, that implements flush() in
+        // terms of rhiFlush().
         return new QRhiBackingStore(window);
     default:
         return nullptr;
@@ -395,38 +405,9 @@ QVariant QCocoaIntegration::styleHint(StyleHint hint) const
     return QPlatformIntegration::styleHint(hint);
 }
 
-Qt::KeyboardModifiers QCocoaIntegration::queryKeyboardModifiers() const
+QPlatformKeyMapper *QCocoaIntegration::keyMapper() const
 {
-    return QAppleKeyMapper::queryKeyboardModifiers();
-}
-
-QList<int> QCocoaIntegration::possibleKeys(const QKeyEvent *event) const
-{
-    return mKeyboardMapper->possibleKeys(event);
-}
-
-void QCocoaIntegration::setToolbar(QWindow *window, NSToolbar *toolbar)
-{
-    if (NSToolbar *prevToolbar = mToolbars.value(window))
-        [prevToolbar release];
-
-    [toolbar retain];
-    mToolbars.insert(window, toolbar);
-}
-
-NSToolbar *QCocoaIntegration::toolbar(QWindow *window) const
-{
-    return mToolbars.value(window);
-}
-
-void QCocoaIntegration::clearToolbars()
-{
-    QHash<QWindow *, NSToolbar *>::const_iterator it = mToolbars.constBegin();
-    while (it != mToolbars.constEnd()) {
-        [it.value() release];
-        ++it;
-    }
-    mToolbars.clear();
+    return mKeyboardMapper.data();
 }
 
 void QCocoaIntegration::setApplicationIcon(const QIcon &icon) const
@@ -434,6 +415,11 @@ void QCocoaIntegration::setApplicationIcon(const QIcon &icon) const
     // Fall back to a size that looks good on the highest resolution screen available
     auto fallbackSize = NSApp.dockTile.size.width * qGuiApp->devicePixelRatio();
     NSApp.applicationIconImage = [NSImage imageFromQIcon:icon withSize:fallbackSize];
+}
+
+void QCocoaIntegration::setApplicationBadge(qint64 number)
+{
+    NSApp.dockTile.badgeLabel = number ? [NSString stringWithFormat:@"%" PRId64, number] : nil;
 }
 
 void QCocoaIntegration::beep() const

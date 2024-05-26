@@ -15,12 +15,14 @@
 #include "qcocoahelpers.h"
 
 #include <QtCore/qfileinfo.h>
+#include <QtCore/private/qcore_mac_p.h>
 #include <QtGui/private/qfont_p.h>
 #include <QtGui/private/qguiapplication_p.h>
 #include <QtGui/private/qcoregraphics_p.h>
 #include <QtGui/qpainter.h>
 #include <QtGui/qtextformat.h>
 #include <QtGui/private/qcoretextfontdatabase_p.h>
+#include <QtGui/private/qappleiconengine_p.h>
 #include <QtGui/private/qfontengine_coretext_p.h>
 #include <QtGui/private/qabstractfileiconengine_p.h>
 #include <qpa/qplatformdialoghelper.h>
@@ -30,6 +32,7 @@
 #include "qcocoacolordialoghelper.h"
 #include "qcocoafiledialoghelper.h"
 #include "qcocoafontdialoghelper.h"
+#include "qcocoamessagedialog.h"
 
 #include <CoreServices/CoreServices.h>
 
@@ -91,6 +94,9 @@ static QPalette *qt_mac_createSystemPalette()
     palette->setColor(QPalette::Active, QPalette::PlaceholderText, qc);
     palette->setColor(QPalette::Inactive, QPalette::PlaceholderText, qc);
     palette->setColor(QPalette::Disabled, QPalette::PlaceholderText, qc);
+
+    qc = qt_mac_toQColor([NSColor controlAccentColor]);
+    palette->setColor(QPalette::Accent, qc);
 
     return palette;
 }
@@ -219,6 +225,8 @@ QCocoaTheme::QCocoaTheme()
         NSSystemColorsDidChangeNotification, [this] {
             handleSystemThemeChange();
     });
+
+    updateColorScheme();
 }
 
 QCocoaTheme::~QCocoaTheme()
@@ -237,6 +245,9 @@ void QCocoaTheme::reset()
 void QCocoaTheme::handleSystemThemeChange()
 {
     reset();
+
+    updateColorScheme();
+
     m_systemPalette = qt_mac_createSystemPalette();
     m_palettes = qt_mac_createRolePalettes();
 
@@ -250,13 +261,15 @@ void QCocoaTheme::handleSystemThemeChange()
 
 bool QCocoaTheme::usePlatformNativeDialog(DialogType dialogType) const
 {
-    if (dialogType == QPlatformTheme::FileDialog)
+    switch (dialogType) {
+    case QPlatformTheme::FileDialog:
+    case QPlatformTheme::ColorDialog:
+    case QPlatformTheme::FontDialog:
+    case QPlatformTheme::MessageDialog:
         return true;
-    if (dialogType == QPlatformTheme::ColorDialog)
-        return true;
-    if (dialogType == QPlatformTheme::FontDialog)
-        return true;
-    return false;
+    default:
+        return false;
+    }
 }
 
 QPlatformDialogHelper *QCocoaTheme::createPlatformDialogHelper(DialogType dialogType) const
@@ -268,6 +281,8 @@ QPlatformDialogHelper *QCocoaTheme::createPlatformDialogHelper(DialogType dialog
         return new QCocoaColorDialogHelper();
     case QPlatformTheme::FontDialog:
         return new QCocoaFontDialogHelper();
+    case QPlatformTheme::MessageDialog:
+        return new QCocoaMessageDialog;
     default:
         return nullptr;
     }
@@ -395,19 +410,8 @@ public:
                                   QPlatformTheme::IconOptions opts) :
         QAbstractFileIconEngine(info, opts) {}
 
-    static QList<QSize> availableIconSizes()
-    {
-        const qreal devicePixelRatio = qGuiApp->devicePixelRatio();
-        const int sizes[] = {
-            qRound(16 * devicePixelRatio), qRound(32 * devicePixelRatio),
-            qRound(64 * devicePixelRatio), qRound(128 * devicePixelRatio),
-            qRound(256 * devicePixelRatio)
-        };
-        return QAbstractFileIconEngine::toSizeList(sizes, sizes + sizeof(sizes) / sizeof(sizes[0]));
-    }
-
     QList<QSize> availableSizes(QIcon::Mode = QIcon::Normal, QIcon::State = QIcon::Off) override
-    { return QCocoaFileIconEngine::availableIconSizes(); }
+    { return QAppleIconEngine::availableIconSizes(); }
 
 protected:
     QPixmap filePixmap(const QSize &size, QIcon::Mode, QIcon::State) override
@@ -426,6 +430,11 @@ QIcon QCocoaTheme::fileIcon(const QFileInfo &fileInfo, QPlatformTheme::IconOptio
     return QIcon(new QCocoaFileIconEngine(fileInfo, iconOptions));
 }
 
+QIconEngine *QCocoaTheme::createIconEngine(const QString &iconName) const
+{
+    return new QAppleIconEngine(iconName);
+}
+
 QVariant QCocoaTheme::themeHint(ThemeHint hint) const
 {
     switch (hint) {
@@ -439,7 +448,7 @@ QVariant QCocoaTheme::themeHint(ThemeHint hint) const
         return QVariant([[NSApplication sharedApplication] isFullKeyboardAccessEnabled] ?
                     int(Qt::TabFocusAllControls) : int(Qt::TabFocusTextControls | Qt::TabFocusListControls));
     case IconPixmapSizes:
-        return QVariant::fromValue(QCocoaFileIconEngine::availableIconSizes());
+        return QVariant::fromValue(QAppleIconEngine::availableIconSizes());
     case QPlatformTheme::PasswordMaskCharacter:
         return QVariant(QChar(0x2022));
     case QPlatformTheme::UiEffects:
@@ -464,9 +473,21 @@ QVariant QCocoaTheme::themeHint(ThemeHint hint) const
     return QPlatformTheme::themeHint(hint);
 }
 
-QPlatformTheme::Appearance QCocoaTheme::appearance() const
+Qt::ColorScheme QCocoaTheme::colorScheme() const
 {
-    return qt_mac_applicationIsInDarkMode() ? Appearance::Dark : Appearance::Light;
+    return m_colorScheme;
+}
+
+/*
+    Update the theme's color scheme based on the current appearance.
+
+    We can only reference the appearance on the main thread, but the
+    CoreText font engine needs to know the color scheme, and might be
+    used from secondary threads, so we cache the color scheme.
+*/
+void QCocoaTheme::updateColorScheme()
+{
+    m_colorScheme = qt_mac_applicationIsInDarkMode() ? Qt::ColorScheme::Dark : Qt::ColorScheme::Light;
 }
 
 QString QCocoaTheme::standardButtonText(int button) const

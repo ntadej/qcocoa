@@ -98,24 +98,7 @@ Q_CONSTRUCTOR_FUNCTION(qRegisterNotificationCallbacks)
 const int QCocoaWindow::NoAlertRequest = -1;
 QPointer<QCocoaWindow> QCocoaWindow::s_windowUnderMouse;
 
-QCocoaWindow::QCocoaWindow(QWindow *win, WId nativeHandle)
-    : QPlatformWindow(win)
-    , m_view(nil)
-    , m_nsWindow(nil)
-    , m_lastReportedWindowState(Qt::WindowNoState)
-    , m_windowModality(Qt::NonModal)
-    , m_initialized(false)
-    , m_inSetVisible(false)
-    , m_inSetGeometry(false)
-    , m_inSetStyleMask(false)
-    , m_menubar(nullptr)
-    , m_frameStrutEventsEnabled(false)
-    , m_registerTouchCount(0)
-    , m_resizableTransientParent(false)
-    , m_alertRequest(NoAlertRequest)
-    , m_drawContentBorderGradient(false)
-    , m_topContentBorderThickness(0)
-    , m_bottomContentBorderThickness(0)
+QCocoaWindow::QCocoaWindow(QWindow *win, WId nativeHandle) : QPlatformWindow(win)
 {
     qCDebug(lcQpaWindow) << "QCocoaWindow::QCocoaWindow" << window();
 
@@ -134,16 +117,24 @@ void QCocoaWindow::initialize()
     if (!m_view)
         m_view = [[QNSView alloc] initWithCocoaWindow:this];
 
-    // Compute the initial geometry based on the geometry set on the
-    // QWindow. This geometry has already been reflected to the
-    // QPlatformWindow in the constructor, so to ensure that the
-    // resulting setGeometry call does not think the geometry has
-    // already been applied, we reset the QPlatformWindow's view
-    // of the geometry first.
-    auto initialGeometry = QPlatformWindow::initialGeometry(window(),
-        windowGeometry(), defaultWindowWidth, defaultWindowHeight);
-    QPlatformWindow::d_ptr->rect = QRect();
-    setGeometry(initialGeometry);
+    if (!isForeignWindow()) {
+        // Compute the initial geometry based on the geometry set on the
+        // QWindow. This geometry has already been reflected to the
+        // QPlatformWindow in the constructor, so to ensure that the
+        // resulting setGeometry call does not think the geometry has
+        // already been applied, we reset the QPlatformWindow's view
+        // of the geometry first.
+        auto initialGeometry = QPlatformWindow::initialGeometry(window(),
+            windowGeometry(), defaultWindowWidth, defaultWindowHeight);
+        QPlatformWindow::d_ptr->rect = QRect();
+        setGeometry(initialGeometry);
+
+        setMask(QHighDpi::toNativeLocalRegion(window()->mask(), window()));
+
+    } else {
+        // Pick up essential foreign window state
+        QPlatformWindow::setGeometry(QRectF::fromCGRect(m_view.frame).toRect());
+    }
 
     recreateWindowIfNeeded();
 
@@ -159,7 +150,10 @@ QCocoaWindow::~QCocoaWindow()
     QMacAutoReleasePool pool;
     [m_nsWindow makeFirstResponder:nil];
     [m_nsWindow setContentView:nil];
-    if ([m_view superview])
+
+    // Remove from superview only if we have a Qt window parent,
+    // as we don't want to affect window container foreign windows.
+    if (QPlatformWindow::parent())
         [m_view removeFromSuperview];
 
     // Make sure to disconnect observer in all case if view is valid
@@ -183,8 +177,7 @@ QCocoaWindow::~QCocoaWindow()
         object:m_view];
 
     [m_view release];
-    [m_nsWindow close];
-    [m_nsWindow release];
+    [m_nsWindow closeAndRelease];
 }
 
 QSurfaceFormat QCocoaWindow::format() const
@@ -315,6 +308,31 @@ void QCocoaWindow::setVisible(bool visible)
 {
     qCDebug(lcQpaWindow) << "QCocoaWindow::setVisible" << window() << visible;
 
+    // Our implementation of setVisible below is not idempotent, as for
+    // modal windows it calls beginSheet/endSheet or starts/ends modal
+    // sessions. However we can't simply guard for m_view.hidden already
+    // having the right state, as the behavior of this function differs
+    // based on whether the window has been initialized or not, as
+    // handleGeometryChange will bail out if the window is still
+    // initializing. Since we know we'll get a second setVisible
+    // call after creation, we can check for that case specifically,
+    // which means we can then safely guard on m_view.hidden changing.
+
+    if (!m_initialized) {
+        qCDebug(lcQpaWindow) << "Window still initializing, skipping setting visibility";
+        return; // We'll get another setVisible call after create is done
+    }
+
+    if (visible == !m_view.hidden && (!isContentView() || visible == m_view.window.visible)) {
+        qCDebug(lcQpaWindow) << "No change in visible status. Ignoring.";
+        return;
+    }
+
+    if (m_inSetVisible) {
+        qCWarning(lcQpaWindow) << "Already setting window visible!";
+        return;
+    }
+
     QScopedValueRollback<bool> rollback(m_inSetVisible, true);
 
     QMacAutoReleasePool pool;
@@ -353,6 +371,9 @@ void QCocoaWindow::setVisible(bool visible)
 
         }
 
+        // Make the NSView visible first, before showing the NSWindow (in case of top level windows)
+        m_view.hidden = NO;
+
         if (isContentView()) {
             QWindowSystemInterface::flushWindowSystemEvents(QEventLoop::ExcludeUserInputEvents);
 
@@ -390,13 +411,6 @@ void QCocoaWindow::setVisible(bool visible)
                 }
             }
         }
-
-        // In some cases, e.g. QDockWidget, the content view is hidden before moving to its own
-        // Cocoa window, and then shown again. Therefore, we test for the view being hidden even
-        // if it's attached to an NSWindow.
-        if ([m_view isHidden])
-            [m_view setHidden:NO];
-
     } else {
         // Window not visible, hide it
         if (isContentView()) {
@@ -425,9 +439,27 @@ void QCocoaWindow::setVisible(bool visible)
                 if (mainWindow && [mainWindow canBecomeKeyWindow])
                     [mainWindow makeKeyWindow];
             }
-        } else {
-            [m_view setHidden:YES];
         }
+
+        // AppKit will in some cases set up the key view loop for child views, even if we
+        // don't set autorecalculatesKeyViewLoop, nor call recalculateKeyViewLoop ourselves.
+        // When a child window is promoted to a top level, AppKit will maintain the key view
+        // loop between the views, even if these views now cross NSWindows, even after we
+        // explicitly call recalculateKeyViewLoop. When the top level is then hidden, AppKit
+        // will complain when -[NSView _setHidden:setNeedsDisplay:] tries to transfer first
+        // responder by reading the nextValidKeyView, and it turns out to live in a different
+        // window. We mitigate this by a last second reset of the first responder, which is
+        // what AppKit also falls back to. It's unclear if the original situation of views
+        // having their nextKeyView pointing to views in other windows is kosher or not.
+        if (m_view.window.firstResponder == m_view && m_view.nextValidKeyView
+            && m_view.nextValidKeyView.window != m_view.window) {
+            qCDebug(lcQpaWindow) << "Detected nextValidKeyView" << m_view.nextValidKeyView
+                << "in different window" << m_view.nextValidKeyView.window
+                << "Resetting" << m_view.window << "first responder to nil.";
+            [m_view.window makeFirstResponder:nil];
+        }
+
+        m_view.hidden = YES;
 
         if (parentCocoaWindow && window()->type() == Qt::Popup) {
             NSWindow *nativeParentWindow = parentCocoaWindow->nativeWindow();
@@ -558,8 +590,6 @@ void QCocoaWindow::updateTitleBarButtons(Qt::WindowFlags windowFlags)
     if (!isContentView())
         return;
 
-    NSWindow *window = m_view.window;
-
     static constexpr std::pair<NSWindowButton, Qt::WindowFlags> buttons[] = {
         { NSWindowCloseButton, Qt::WindowCloseButtonHint },
         { NSWindowMiniaturizeButton, Qt::WindowMinimizeButtonHint},
@@ -568,20 +598,38 @@ void QCocoaWindow::updateTitleBarButtons(Qt::WindowFlags windowFlags)
 
     bool hideButtons = true;
     for (const auto &[button, buttonHint] : buttons) {
+        // Set up Qt defaults based on window type
         bool enabled = true;
+        if (button == NSWindowMiniaturizeButton)
+            enabled = window()->type() != Qt::Dialog;
+
+        // Let users override via CustomizeWindowHint
         if (windowFlags & Qt::CustomizeWindowHint)
             enabled = windowFlags & buttonHint;
+
+        // Then do some final sanitizations
 
         if (button == NSWindowZoomButton && isFixedSize())
             enabled = false;
 
-        [window standardWindowButton:button].enabled = enabled;
+        // Mimic what macOS natively does for parent windows of modal
+        // sheets, which is to disable the close button, but leave the
+        // other buttons as they were.
+        if (button == NSWindowCloseButton && enabled
+            && QWindowPrivate::get(window())->blockedByModalWindow) {
+            enabled = false;
+            // If we end up having no enabled buttons, our workaround
+            // should not be a reason for hiding all of them.
+            hideButtons = false;
+        }
+
+        [m_view.window standardWindowButton:button].enabled = enabled;
         hideButtons &= !enabled;
     }
 
     // Hide buttons in case we disabled all of them
     for (const auto &[button, buttonHint] : buttons)
-        [window standardWindowButton:button].hidden = hideButtons;
+        [m_view.window standardWindowButton:button].hidden = hideButtons;
 }
 
 void QCocoaWindow::setWindowFlags(Qt::WindowFlags flags)
@@ -1093,28 +1141,14 @@ void QCocoaWindow::setMask(const QRegion &region)
     }
 }
 
-bool QCocoaWindow::setKeyboardGrabEnabled(bool grab)
+bool QCocoaWindow::setKeyboardGrabEnabled(bool)
 {
-    qCDebug(lcQpaWindow) << "QCocoaWindow::setKeyboardGrabEnabled" << window() << grab;
-    if (!isContentView())
-        return false;
-
-    if (grab && ![m_view.window isKeyWindow])
-        [m_view.window makeKeyWindow];
-
-    return true;
+    return false; // FIXME (QTBUG-106597)
 }
 
-bool QCocoaWindow::setMouseGrabEnabled(bool grab)
+bool QCocoaWindow::setMouseGrabEnabled(bool)
 {
-    qCDebug(lcQpaWindow) << "QCocoaWindow::setMouseGrabEnabled" << window() << grab;
-    if (!isContentView())
-        return false;
-
-    if (grab && ![m_view.window isKeyWindow])
-        [m_view.window makeKeyWindow];
-
-    return true;
+    return false; // FIXME (QTBUG-106597)
 }
 
 WId QCocoaWindow::winId() const
@@ -1212,32 +1246,33 @@ void QCocoaWindow::windowDidEndLiveResize()
 
 void QCocoaWindow::windowDidBecomeKey()
 {
-    if (!isContentView())
+    // The NSWindow we're part of become key. Check if we're the first
+    // responder, and if so, deliver focus window change to our window.
+    if (m_view.window.firstResponder != m_view)
         return;
 
-    if (isForeignWindow())
-        return;
+    qCDebug(lcQpaWindow) << m_view.window << "became key window."
+        << "Updating focus window to" << this << "with view" << m_view;
 
-    QNSView *firstResponderView = qt_objc_cast<QNSView *>(m_view.window.firstResponder);
-    if (!firstResponderView)
+    if (windowIsPopupType()) {
+        qCDebug(lcQpaWindow) << "Window is popup. Skipping focus window change.";
         return;
-
-    const QCocoaWindow *focusCocoaWindow = firstResponderView.platformWindow;
-    if (focusCocoaWindow->windowIsPopupType())
-        return;
+    }
 
     // See also [QNSView becomeFirstResponder]
-    QWindowSystemInterface::handleWindowActivated<QWindowSystemInterface::SynchronousDelivery>(
-                focusCocoaWindow->window(), Qt::ActiveWindowFocusReason);
+    QWindowSystemInterface::handleFocusWindowChanged<QWindowSystemInterface::SynchronousDelivery>(
+                window(), Qt::ActiveWindowFocusReason);
 }
 
 void QCocoaWindow::windowDidResignKey()
 {
-    if (!isContentView())
+    // The NSWindow we're part of lost key. Check if we're the first
+    // responder, and if so, deliver window deactivation to our window.
+    if (m_view.window.firstResponder != m_view)
         return;
 
-    if (isForeignWindow())
-        return;
+    qCDebug(lcQpaWindow) << m_view.window << "resigned key window."
+        << "Clearing focus window" << this << "with view" << m_view;
 
     // Make sure popups are closed before we deliver activation changes, which are
     // otherwise ignored by QApplication.
@@ -1249,12 +1284,14 @@ void QCocoaWindow::windowDidResignKey()
     NSWindow *newKeyWindow = [NSApp keyWindow];
     if (newKeyWindow && newKeyWindow != m_view.window
         && [newKeyWindow conformsToProtocol:@protocol(QNSWindowProtocol)]) {
+        qCDebug(lcQpaWindow) << "New key window" << newKeyWindow
+            << "is Qt window. Deferring focus window change.";
         return;
     }
 
     // Lost key window, go ahead and set the active window to zero
     if (!windowIsPopupType()) {
-        QWindowSystemInterface::handleWindowActivated<QWindowSystemInterface::SynchronousDelivery>(
+        QWindowSystemInterface::handleFocusWindowChanged<QWindowSystemInterface::SynchronousDelivery>(
             nullptr, Qt::ActiveWindowFocusReason);
     }
 }
@@ -1291,8 +1328,14 @@ void QCocoaWindow::windowDidOrderOffScreen()
 
 void QCocoaWindow::windowDidChangeOcclusionState()
 {
+    // Note, we don't take the view's hiddenOrHasHiddenAncestor state into
+    // account here, but instead leave that up to handleExposeEvent, just
+    // like all the other signals that could potentially change the exposed
+    // state of the window.
     bool visible = m_view.window.occlusionState & NSWindowOcclusionStateVisible;
-    qCDebug(lcQpaWindow) << "QCocoaWindow::windowDidChangeOcclusionState" << window() << "is now" << (visible ? "visible" : "occluded");
+    qCDebug(lcQpaWindow) << "Occlusion state of" << m_view.window << "for"
+        << window() << "changed to" << (visible ? "visible" : "occluded");
+
     if (visible)
         [m_view setNeedsDisplay:YES];
     else
@@ -1460,13 +1503,29 @@ void QCocoaWindow::recreateWindowIfNeeded()
     QMacAutoReleasePool pool;
 
     QPlatformWindow *parentWindow = QPlatformWindow::parent();
-
-    const bool isEmbeddedView = isEmbedded();
-    RecreationReasons recreateReason = RecreationNotNeeded;
+    auto *parentCocoaWindow = static_cast<QCocoaWindow *>(parentWindow);
 
     QCocoaWindow *oldParentCocoaWindow = nullptr;
     if (QNSView *qnsView = qnsview_cast(m_view.superview))
         oldParentCocoaWindow = qnsView.platformWindow;
+
+    if (isForeignWindow()) {
+        // A foreign window is created as such, and can never move between being
+        // foreign and not, so we don't need to get rid of any existing NSWindows,
+        // nor create new ones, as a foreign window is a single simple NSView.
+        qCDebug(lcQpaWindow) << "Skipping NSWindow management for foreign window" << this;
+
+        // We do however need to manage the parent relationship
+        if (parentCocoaWindow)
+            [parentCocoaWindow->m_view addSubview:m_view];
+        else if (oldParentCocoaWindow)
+            [m_view removeFromSuperview];
+
+        return;
+    }
+
+    const bool isEmbeddedView = isEmbedded();
+    RecreationReasons recreateReason = RecreationNotNeeded;
 
     if (parentWindow != oldParentCocoaWindow)
          recreateReason |= ParentChanged;
@@ -1498,8 +1557,6 @@ void QCocoaWindow::recreateWindowIfNeeded()
     if (recreateReason == RecreationNotNeeded)
         return;
 
-    QCocoaWindow *parentCocoaWindow = static_cast<QCocoaWindow *>(parentWindow);
-
     // Remove current window (if any)
     if ((isContentView() && !shouldBeContentView) || (recreateReason & PanelChanged)) {
         if (m_nsWindow) {
@@ -1529,31 +1586,10 @@ void QCocoaWindow::recreateWindowIfNeeded()
         }
     }
 
-    if (isEmbeddedView) {
-        // An embedded window doesn't have its own NSWindow.
-    } else if (!parentWindow) {
-        // QPlatformWindow subclasses must sync up with QWindow on creation:
-        propagateSizeHints();
-        setWindowFlags(window()->flags());
-        setWindowTitle(window()->title());
-        setWindowFilePath(window()->filePath()); // Also sets window icon
-        setWindowState(window()->windowState());
-    } else {
+    if (parentCocoaWindow) {
         // Child windows have no NSWindow, re-parent to superview instead
         [parentCocoaWindow->m_view addSubview:m_view];
-        [m_view setHidden:!window()->isVisible()];
     }
-
-    const qreal opacity = qt_window_private(window())->opacity;
-    if (!qFuzzyCompare(opacity, qreal(1.0)))
-        setOpacity(opacity);
-
-    setMask(QHighDpi::toNativeLocalRegion(window()->mask(), window()));
-
-    // top-level QWindows may have an attached NSToolBar, call
-    // update function which will attach to the NSWindow.
-    if (!parentWindow && !isEmbeddedView)
-        updateNSToolbar();
 }
 
 void QCocoaWindow::requestUpdate()
@@ -1562,7 +1598,10 @@ void QCocoaWindow::requestUpdate()
         << "using" << (updatesWithDisplayLink() ? "display-link" : "timer");
 
     if (updatesWithDisplayLink()) {
-        static_cast<QCocoaScreen *>(screen())->requestUpdate();
+        if (!static_cast<QCocoaScreen *>(screen())->requestUpdate()) {
+            qCDebug(lcQpaDrawing) << "Falling back to timer-based update request";
+            QPlatformWindow::requestUpdate();
+        }
     } else {
         // Fall back to the un-throttled timer-based callback
         QPlatformWindow::requestUpdate();
@@ -1756,8 +1795,9 @@ QCocoaNSWindow *QCocoaWindow::createNSWindow(bool shouldBePanel)
         // Qt::Tool windows hide on app deactivation, unless Qt::WA_MacAlwaysShowToolWindow is set
         nsWindow.hidesOnDeactivate = ((type & Qt::Tool) == Qt::Tool) && !alwaysShowToolWindow();
 
-        // Make popup windows show on the same desktop as the parent full-screen window
-        nsWindow.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary;
+        // Make popup windows show on the same desktop as the parent window
+        nsWindow.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary
+                | NSWindowCollectionBehaviorMoveToActiveSpace;
 
         if ((type & Qt::Popup) == Qt::Popup) {
             nsWindow.hasShadow = YES;
@@ -1772,11 +1812,15 @@ QCocoaNSWindow *QCocoaWindow::createNSWindow(bool shouldBePanel)
 
     applyContentBorderThickness(nsWindow);
 
-    if (QColorSpace colorSpace = format().colorSpace(); colorSpace.isValid()) {
-        NSData *iccData = colorSpace.iccProfile().toNSData();
-        nsWindow.colorSpace = [[[NSColorSpace alloc] initWithICCProfileData:iccData] autorelease];
-        qCDebug(lcQpaDrawing) << "Set" << this << "color space to" << nsWindow.colorSpace;
-    }
+    // We propagate the view's color space granulary to both the IOSurfaces
+    // used for QSurface::RasterSurface, as well as the CAMetalLayer used for
+    // QSurface::MetalSurface, but for QSurface::OpenGLSurface we don't have
+    // that option as we use NSOpenGLContext instead of CAOpenGLLayer. As a
+    // workaround we set the NSWindow's color space, which affects GL drawing
+    // with NSOpenGLContext as well. This does not conflict with the granular
+    // modifications we do to each surface for raster or Metal.
+    if (auto *qtView = qnsview_cast(m_view))
+        nsWindow.colorSpace = qtView.colorSpace;
 
     return nsWindow;
 }
@@ -1811,22 +1855,32 @@ void QCocoaWindow::setWindowCursor(NSCursor *cursor)
     if (isForeignWindow())
         return;
 
+    qCInfo(lcQpaMouse) << "Setting" << this << "cursor to" << cursor;
+
     QNSView *view = qnsview_cast(m_view);
     if (cursor == view.cursor)
         return;
 
     view.cursor = cursor;
 
+    // We're not using the the legacy cursor rects API to manage our
+    // cursor, but calling this function also invalidates AppKit's
+    // view of whether or not we need a cursorUpdate callback for
+    // our tracking area.
     [m_view.window invalidateCursorRectsForView:m_view];
 
-    // There's a bug in AppKit where calling invalidateCursorRectsForView when
-    // there's an override cursor active (for example when hovering over the
-    // window frame), will not result in a cursorUpdate: callback. To work around
-    // this we synthesize a cursor update event and call the callback ourselves,
-    // if we detect that the mouse is currently over the view.
+    // We've informed AppKit that we need a cursorUpdate, but cursor
+    // updates for tracking areas are deferred in some cases, such as
+    // when the mouse is down, whereas we want a synchronous update.
+    // To ensure an updated cursor we synthesize a cursor update event
+    // now if the window is otherwise allowed to change the cursor.
     auto locationInWindow = m_view.window.mouseLocationOutsideOfEventStream;
     auto locationInSuperview = [m_view.superview convertPoint:locationInWindow fromView:nil];
-    if ([m_view hitTest:locationInSuperview] == m_view) {
+    bool mouseIsOverView = [m_view hitTest:locationInSuperview] == m_view;
+    auto utilityMask = NSWindowStyleMaskUtilityWindow | NSWindowStyleMaskTitled;
+    bool isUtilityWindow = (m_view.window.styleMask & utilityMask) == utilityMask;
+    if (mouseIsOverView && (m_view.window.keyWindow || isUtilityWindow)) {
+        qCDebug(lcQpaMouse) << "Synthesizing cursor update";
         [m_view cursorUpdate:[NSEvent enterExitEventWithType:NSEventTypeCursorUpdate
             location:locationInWindow modifierFlags:0 timestamp:0
             windowNumber:m_view.window.windowNumber context:nil
@@ -1841,16 +1895,6 @@ void QCocoaWindow::registerTouch(bool enable)
         m_view.allowedTouchTypes |= NSTouchTypeMaskIndirect;
     else if (m_registerTouchCount == 0)
         m_view.allowedTouchTypes &= ~NSTouchTypeMaskIndirect;
-}
-
-void QCocoaWindow::setContentBorderThickness(int topThickness, int bottomThickness)
-{
-    m_topContentBorderThickness = topThickness;
-    m_bottomContentBorderThickness = bottomThickness;
-    bool enable = (topThickness > 0 || bottomThickness > 0);
-    m_drawContentBorderGradient = enable;
-
-    applyContentBorderThickness();
 }
 
 void QCocoaWindow::registerContentBorderArea(quintptr identifier, int upper, int lower)
@@ -1889,7 +1933,7 @@ void QCocoaWindow::applyContentBorderThickness(NSWindow *window)
     // Find consecutive registered border areas, starting from the top.
     std::vector<BorderRange> ranges(m_contentBorderAreas.cbegin(), m_contentBorderAreas.cend());
     std::sort(ranges.begin(), ranges.end());
-    int effectiveTopContentBorderThickness = m_topContentBorderThickness;
+    int effectiveTopContentBorderThickness = 0;
     for (BorderRange range : ranges) {
         // Skip disiabled ranges (typically hidden tool bars)
         if (!m_enabledContentBorderAreas.value(range.identifier, false))
@@ -1904,7 +1948,7 @@ void QCocoaWindow::applyContentBorderThickness(NSWindow *window)
             break;
     }
 
-    int effectiveBottomContentBorderThickness = m_bottomContentBorderThickness;
+    int effectiveBottomContentBorderThickness = 0;
 
     [window setStyleMask:[window styleMask] | NSWindowStyleMaskTexturedBackground];
     window.titlebarAppearsTransparent = YES;
@@ -1926,21 +1970,6 @@ void QCocoaWindow::applyContentBorderThickness(NSWindow *window)
     [[[window contentView] superview] setNeedsDisplay:YES];
 }
 
-void QCocoaWindow::updateNSToolbar()
-{
-    if (!isContentView())
-        return;
-
-    NSToolbar *toolbar = QCocoaIntegration::instance()->toolbar(window());
-    const NSWindow *window = m_view.window;
-
-    if (window.toolbar == toolbar)
-       return;
-
-    window.toolbar = toolbar;
-    window.showsToolbarButton = YES;
-}
-
 bool QCocoaWindow::testContentBorderAreaPosition(int position) const
 {
     if (!m_drawContentBorderGradient || !isContentView())
@@ -1960,7 +1989,7 @@ qreal QCocoaWindow::devicePixelRatio() const
 {
     // The documented way to observe the relationship between device-independent
     // and device pixels is to use one for the convertToBacking functions. Other
-    // methods such as [NSWindow backingScaleFacor] might not give the correct
+    // methods such as [NSWindow backingScaleFactor] might not give the correct
     // result, for example if setWantsBestResolutionOpenGLSurface is not set or
     // or ignored by the OpenGL driver.
     NSSize backingSize = [m_view convertSizeToBacking:NSMakeSize(1.0, 1.0)];
@@ -1987,6 +2016,22 @@ bool QCocoaWindow::shouldRefuseKeyWindowAndFirstResponder()
     if (window()->flags() & (Qt::WindowDoesNotAcceptFocus | Qt::WindowTransparentForInput))
         return true;
 
+    // For application modal windows, as well as direct parent windows
+    // of window modal windows, AppKit takes care of blocking interaction.
+    // The Qt expectation however, is that all transient parents of a
+    // window modal window is blocked, as reflected by QGuiApplication.
+    // We reflect this by returning false from this function for transient
+    // parents blocked by a modal window, but limit it to the cases not
+    // covered by AppKit to avoid potential unwanted side effects.
+    QWindow *modalWindow = nullptr;
+    if (QGuiApplicationPrivate::instance()->isWindowBlocked(window(), &modalWindow)) {
+        if (modalWindow->modality() == Qt::WindowModal && modalWindow->transientParent() != window()) {
+            qCDebug(lcQpaWindow) << "Refusing key window for" << this << "due to being"
+                << "blocked by" << modalWindow;
+            return true;
+        }
+    }
+
     if (m_inSetVisible) {
         QVariant showWithoutActivating = window()->property("_q_showWithoutActivating");
         if (showWithoutActivating.isValid() && showWithoutActivating.toBool())
@@ -1994,6 +2039,20 @@ bool QCocoaWindow::shouldRefuseKeyWindowAndFirstResponder()
     }
 
     return false;
+}
+
+bool QCocoaWindow::windowEvent(QEvent *event)
+{
+    switch (event->type()) {
+    case QEvent::WindowBlocked:
+    case QEvent::WindowUnblocked:
+        updateTitleBarButtons(window()->flags());
+        break;
+    default:
+        break;
+    }
+
+    return QPlatformWindow::windowEvent(event);
 }
 
 QPoint QCocoaWindow::bottomLeftClippedByNSWindowOffset() const

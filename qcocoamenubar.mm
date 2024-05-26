@@ -9,10 +9,12 @@
 #include "qcocoamenuloader.h"
 #include "qcocoaapplication.h" // for custom application category
 #include "qcocoaapplicationdelegate.h"
+#include "qcocoahelpers.h"
 
 #include <QtGui/QGuiApplication>
 #include <QtCore/QDebug>
 
+#include <QtCore/private/qcore_mac_p.h>
 #include <QtGui/private/qguiapplication_p.h>
 
 QT_BEGIN_NAMESPACE
@@ -29,16 +31,12 @@ QCocoaMenuBar::QCocoaMenuBar()
     });
 
     m_nativeMenu = [[NSMenu alloc] init];
-#ifdef QT_COCOA_ENABLE_MENU_DEBUG
-    qDebug() << "Construct QCocoaMenuBar" << this << m_nativeMenu;
-#endif
+    qCDebug(lcQpaMenus) << "Constructed" << this << "with" << m_nativeMenu;
 }
 
 QCocoaMenuBar::~QCocoaMenuBar()
 {
-#ifdef QT_COCOA_ENABLE_MENU_DEBUG
-    qDebug() << "~QCocoaMenuBar" << this;
-#endif
+    qCDebug(lcQpaMenus) << "Destructing" << this << "with" << m_nativeMenu;;
     for (auto menu : std::as_const(m_menus)) {
         if (!menu)
             continue;
@@ -92,17 +90,16 @@ void QCocoaMenuBar::insertMenu(QPlatformMenu *platformMenu, QPlatformMenu *befor
 {
     QCocoaMenu *menu = static_cast<QCocoaMenu *>(platformMenu);
     QCocoaMenu *beforeMenu = static_cast<QCocoaMenu *>(before);
-#ifdef QT_COCOA_ENABLE_MENU_DEBUG
-    qDebug() << "QCocoaMenuBar" << this << "insertMenu" << menu << "before" << before;
-#endif
+
+    qCDebug(lcQpaMenus) << "Inserting" << menu << "before" << before << "into" << this;
 
     if (m_menus.contains(QPointer<QCocoaMenu>(menu))) {
-        qWarning("This menu already belongs to the menubar, remove it first");
+        qCWarning(lcQpaMenus, "This menu already belongs to the menubar, remove it first");
         return;
     }
 
     if (beforeMenu && !m_menus.contains(QPointer<QCocoaMenu>(beforeMenu))) {
-        qWarning("The before menu does not belong to the menubar");
+        qCWarning(lcQpaMenus, "The before menu does not belong to the menubar");
         return;
     }
 
@@ -136,7 +133,7 @@ void QCocoaMenuBar::removeMenu(QPlatformMenu *platformMenu)
 {
     QCocoaMenu *menu = static_cast<QCocoaMenu *>(platformMenu);
     if (!m_menus.contains(menu)) {
-        qWarning("Trying to remove a menu that does not belong to the menubar");
+        qCWarning(lcQpaMenus) << "Trying to remove" << menu << "that does not belong to" << this;
         return;
     }
 
@@ -177,10 +174,44 @@ void QCocoaMenuBar::syncMenu_helper(QPlatformMenu *menu, bool menubarUpdate)
             }
     }
 
-    if (NSMenuItem *attachedItem = cocoaMenu->attachedItem()) {
-        // Non-nil attached item means the item's submenu is set
-        attachedItem.title = cocoaMenu->nsMenu().title;
-        attachedItem.hidden = shouldHide;
+    if (NSMenuItem *menuItem = cocoaMenu->attachedItem()) {
+        // Non-nil menu item means the item's sub menu is set
+
+        NSString *menuTitle = cocoaMenu->nsMenu().title;
+
+        // The NSMenu's title is what's visible to the user, and AppKit uses this
+        // for some of its heuristics of when to add special items to the menus,
+        // such as 'Enter Full Screen' in the View menu, the search bare in the
+        // Help menu, and the "Send App feedback to Apple" in the Help menu.
+        // This relies on the title matching AppKit's localized value from the
+        // MenuCommands table, which in turn depends on the preferredLocalizations
+        // of the AppKit bundle. We don't do any automatic translation of menu
+        // titles visible to the user, so this relies on the application developer
+        // having chosen translated titles that match AppKit's, and that the Qt
+        // preferred UI languages match AppKit's preferredLocalizations.
+
+        // In the case of the Edit menu, AppKit uses the NSMenuItem's title
+        // for its heuristics of when to add the dictation and emoji entries,
+        // and this title is not visible to the user. But like above, the
+        // heuristics are based on the localized title of the menu, so we need
+        // to ensure the title matches AppKit's localization.
+
+        // Unfortunately, the title we have at this point may have gone through
+        // Qt's i18n machinery already, via e.g. tr("Edit") in the application,
+        // in which case we don't know the context of the translation, and can't
+        // do a reverse lookup to go back to the untranslated title to pass to
+        // AppKit. As a workaround we translate the title via a our context,
+        // and document that the user needs to ensure their application matches
+        // this translation.
+        if ([menuTitle isEqual:@"Edit"] || [menuTitle isEqual:tr("Edit").toNSString()]) {
+            menuItem.title = qt_mac_AppKitString(@"InputManager", @"Edit");
+        } else {
+            // The Edit menu is the only case we know of so far, but to be on
+            // the safe side we always sync the menu title.
+            menuItem.title = menuTitle;
+        }
+
+        menuItem.hidden = shouldHide;
     }
 }
 
@@ -194,9 +225,7 @@ NSMenuItem *QCocoaMenuBar::nativeItemForMenu(QCocoaMenu *menu) const
 
 void QCocoaMenuBar::handleReparent(QWindow *newParentWindow)
 {
-#ifdef QT_COCOA_ENABLE_MENU_DEBUG
-    qDebug() << "QCocoaMenuBar" << this << "handleReparent" << newParentWindow;
-#endif
+    qCDebug(lcQpaMenus) << "Reparenting" << this << "to" << newParentWindow;
 
     if (!m_window.isNull())
         m_window->setMenubar(nullptr);
@@ -264,9 +293,8 @@ void QCocoaMenuBar::updateMenuBarImmediately()
     if (!mb)
         return;
 
-#ifdef QT_COCOA_ENABLE_MENU_DEBUG
-    qDebug() << "QCocoaMenuBar" << "updateMenuBarImmediately" << cw;
-#endif
+    qCDebug(lcQpaMenus) << "Updating" << mb << "immediately for" << cw;
+
     bool disableForModal = mb->shouldDisable(cw);
 
     for (auto menu : std::as_const(mb->m_menus)) {
@@ -298,25 +326,23 @@ void QCocoaMenuBar::updateMenuBarImmediately()
     }
 
     [mergedItems release];
-    [NSApp setMainMenu:mb->nsMenu()];
+
+    NSMenu *newMainMenu = mb->nsMenu();
+    if (NSApp.mainMenu == newMainMenu) {
+        // NSApplication triggers _customizeMainMenu when the menu
+        // changes, which takes care of adding text input items to
+        // the edit menu e.g., but this doesn't happen if the menu
+        // is the same. In our case we might be re-using an existing
+        // menu, but the menu might have new sub menus that need to
+        // be customized. To ensure NSApplication does the right
+        // thing we reset the main menu first.
+        qCDebug(lcQpaMenus) << "Clearing main menu temporarily";
+        NSApp.mainMenu = nil;
+    }
+    NSApp.mainMenu = newMainMenu;
+
     insertWindowMenu();
     [loader qtTranslateApplicationMenu];
-
-    for (auto menu : std::as_const(mb->m_menus)) {
-        if (!menu)
-            continue;
-
-        const QString captionNoAmpersand = QString::fromNSString(menu->nsMenu().title).remove(u'&');
-        if (captionNoAmpersand != QCoreApplication::translate("QCocoaMenu", "Edit"))
-            continue;
-
-        NSMenuItem *item = mb->nativeItemForMenu(menu);
-        auto *nsMenu = item.submenu;
-        if ([nsMenu indexOfItemWithTarget:NSApp andAction:@selector(startDictation:)] == -1) {
-            // AppKit was not able to recognize the special role of this menu item.
-            mb->insertDefaultEditItems(menu);
-        }
-    }
 }
 
 void QCocoaMenuBar::insertWindowMenu()
@@ -335,6 +361,15 @@ void QCocoaMenuBar::insertWindowMenu()
     winMenuItem.hidden = YES;
 
     winMenuItem.submenu = [[[NSMenu alloc] initWithTitle:@"QtWindowMenu"] autorelease];
+
+    // AppKit has a bug in [NSApplication setWindowsMenu:] where it will resolve
+    // the last item of the window menu's itemArray, but not account for the array
+    // being empty, resulting in a lookup of itemAtIndex:-1. To work around this,
+    // we insert a hidden dummy item into the menu. See FB13369198.
+    auto *dummyItem = [[NSMenuItem alloc] initWithTitle:@"" action:nil keyEquivalent:@""];
+    dummyItem.hidden = YES;
+    [winMenuItem.submenu addItem:[dummyItem autorelease]];
+
     [mainMenu insertItem:winMenuItem atIndex:mainMenu.itemArray.count];
     app.windowsMenu = winMenuItem.submenu;
 
@@ -354,8 +389,11 @@ void QCocoaMenuBar::insertWindowMenu()
 QList<QCocoaMenuItem*> QCocoaMenuBar::merged() const
 {
     QList<QCocoaMenuItem*> r;
-    for (auto menu : std::as_const(m_menus))
+    for (auto menu : std::as_const(m_menus)) {
+        if (!menu)
+            continue;
         r.append(menu->merged());
+    }
 
     return r;
 }
@@ -399,7 +437,7 @@ bool QCocoaMenuBar::shouldDisable(QCocoaWindow *active) const
 QPlatformMenu *QCocoaMenuBar::menuForTag(quintptr tag) const
 {
     for (auto menu : std::as_const(m_menus))
-        if (menu->tag() ==  tag)
+        if (menu && menu->tag() == tag)
             return menu;
 
     return nullptr;
@@ -407,10 +445,13 @@ QPlatformMenu *QCocoaMenuBar::menuForTag(quintptr tag) const
 
 NSMenuItem *QCocoaMenuBar::itemForRole(QPlatformMenuItem::MenuRole role)
 {
-    for (auto menu : std::as_const(m_menus))
-        for (auto *item : menu->items())
-            if (item->effectiveRole() == role)
-                return item->nsItem();
+    for (auto menu : std::as_const(m_menus)) {
+        if (menu) {
+            for (auto *item : menu->items())
+                if (item->effectiveRole() == role)
+                    return item->nsItem();
+        }
+    }
 
     return nil;
 }
@@ -418,48 +459,6 @@ NSMenuItem *QCocoaMenuBar::itemForRole(QPlatformMenuItem::MenuRole role)
 QCocoaWindow *QCocoaMenuBar::cocoaWindow() const
 {
     return m_window.data();
-}
-
-void QCocoaMenuBar::insertDefaultEditItems(QCocoaMenu *menu)
-{
-    if (menu->items().isEmpty())
-        return;
-
-    NSMenu *nsEditMenu = menu->nsMenu();
-    if ([nsEditMenu itemAtIndex:nsEditMenu.numberOfItems - 1].action
-        == @selector(orderFrontCharacterPalette:)) {
-        for (auto defaultEditMenuItem : std::as_const(m_defaultEditMenuItems)) {
-            if (menu->items().contains(defaultEditMenuItem))
-                menu->removeMenuItem(defaultEditMenuItem);
-        }
-        qDeleteAll(m_defaultEditMenuItems);
-        m_defaultEditMenuItems.clear();
-    } else {
-        if (m_defaultEditMenuItems.isEmpty()) {
-            QCocoaMenuItem *separator = new QCocoaMenuItem;
-            separator->setIsSeparator(true);
-
-            QCocoaMenuItem *dictationItem = new QCocoaMenuItem;
-            dictationItem->setText(QCoreApplication::translate("QCocoaMenuItem", "Start Dictation..."));
-            QObject::connect(dictationItem, &QPlatformMenuItem::activated, this, []{
-                [NSApplication.sharedApplication performSelector:@selector(startDictation:)];
-            });
-
-            QCocoaMenuItem *emojiItem = new QCocoaMenuItem;
-            emojiItem->setText(QCoreApplication::translate("QCocoaMenuItem", "Emoji && Symbols"));
-            emojiItem->setShortcut(QKeyCombination(Qt::MetaModifier|Qt::ControlModifier, Qt::Key_Space));
-            QObject::connect(emojiItem, &QPlatformMenuItem::activated, this, []{
-                [NSApplication.sharedApplication orderFrontCharacterPalette:nil];
-            });
-
-            m_defaultEditMenuItems << separator << dictationItem << emojiItem;
-        }
-        for (auto defaultEditMenuItem : std::as_const(m_defaultEditMenuItems)) {
-            if (menu->items().contains(defaultEditMenuItem))
-                menu->removeMenuItem(defaultEditMenuItem);
-            menu->insertMenuItem(defaultEditMenuItem, nullptr);
-        }
-    }
 }
 
 QT_END_NAMESPACE

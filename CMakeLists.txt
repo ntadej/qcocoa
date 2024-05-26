@@ -1,7 +1,7 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.19)
 
 project(qcocoa
-    VERSION "6.4.3.0"
+    VERSION "6.7.1.0"
     LANGUAGES CXX C
 )
 
@@ -18,7 +18,7 @@ qt_prepare_standalone_project()
 
 qt_internal_add_plugin(QCocoaIntegrationPlugin
     OUTPUT_NAME qcocoa
-    DEFAULT_IF ${QT_QPA_DEFAULT_PLATFORM} MATCHES cocoa # special case
+    DEFAULT_IF ${QT_QPA_DEFAULT_PLATFORM} MATCHES cocoa
     PLUGIN_TYPE platforms
     SOURCES
         main.mm
@@ -26,12 +26,9 @@ qt_internal_add_plugin(QCocoaIntegrationPlugin
         qcocoaapplicationdelegate.h qcocoaapplicationdelegate.mm
         qcocoabackingstore.h qcocoabackingstore.mm
         qcocoaclipboard.h qcocoaclipboard.mm
-        qcocoacolordialoghelper.h qcocoacolordialoghelper.mm
         qcocoacursor.h qcocoacursor.mm
         qcocoadrag.h qcocoadrag.mm
         qcocoaeventdispatcher.h qcocoaeventdispatcher.mm
-        qcocoafiledialoghelper.h qcocoafiledialoghelper.mm
-        qcocoafontdialoghelper.h qcocoafontdialoghelper.mm
         qcocoahelpers.h qcocoahelpers.mm
         qcocoainputcontext.h qcocoainputcontext.mm
         qcocoaintegration.h qcocoaintegration.mm
@@ -58,6 +55,7 @@ qt_internal_add_plugin(QCocoaIntegrationPlugin
         qcocoacolordialoghelper.h qcocoacolordialoghelper.mm
         qcocoafiledialoghelper.h qcocoafiledialoghelper.mm
         qcocoafontdialoghelper.h qcocoafontdialoghelper.mm
+        qcocoamessagedialog.h qcocoamessagedialog.mm
     DEFINES
         QT_NO_FOREACH
     LIBRARIES
@@ -69,15 +67,14 @@ qt_internal_add_plugin(QCocoaIntegrationPlugin
         ${FWIOSurface}
         ${FWMetal}
         ${FWQuartzCore}
+        ${FWUniformTypeIdentifiers}
         Qt::Core
         Qt::CorePrivate
         Qt::Gui
         Qt::GuiPrivate
 )
 
-# special case begin
 qt_disable_apple_app_extension_api_only(QCocoaIntegrationPlugin)
-# special case end
 
 # Resources:
 set(qcocoaresources_resource_files
@@ -92,10 +89,6 @@ qt_internal_add_resource(QCocoaIntegrationPlugin "qcocoaresources"
     FILES
         ${qcocoaresources_resource_files}
 )
-
-
-#### Keys ignored in scope 1:.:.:cocoa.pro:<TRUE>:
-# OTHER_FILES = "cocoa.json"
 
 ## Scopes:
 #####################################################################
@@ -120,8 +113,3 @@ qt_internal_extend_target(QCocoaIntegrationPlugin CONDITION QT_FEATURE_sessionma
     SOURCES
         qcocoasessionmanager.cpp qcocoasessionmanager.h
 )
-
-#### Keys ignored in scope 7:.:.:cocoa.pro:TARGET Qt::Widgets:
-# QT_FOR_CONFIG = "widgets"
-#### Keys ignored in scope 12:.:.:cocoa.pro:NOT TARGET___equals____ss_QT_DEFAULT_QPA_PLUGIN:
-# PLUGIN_EXTENDS = "-"
