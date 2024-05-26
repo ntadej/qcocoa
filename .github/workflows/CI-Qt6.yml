@@ -75,7 +75,7 @@ jobs:
           popd
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: qcocoa
           path: qcocoa.tar.bz2
