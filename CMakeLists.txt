@@ -1,7 +1,10 @@
-cmake_minimum_required(VERSION 3.19)
+# Copyright (C) 2022 The Qt Company Ltd.
+# SPDX-License-Identifier: BSD-3-Clause
+
+cmake_minimum_required(VERSION 3.22)
 
 project(qcocoa
-    VERSION "6.7.3.0"
+    VERSION "6.9.0.0"
     LANGUAGES CXX C
 )
 
@@ -18,7 +21,7 @@ qt_prepare_standalone_project()
 
 qt_internal_add_plugin(QCocoaIntegrationPlugin
     OUTPUT_NAME qcocoa
-    DEFAULT_IF ${QT_QPA_DEFAULT_PLATFORM} MATCHES cocoa
+    DEFAULT_IF "cocoa" IN_LIST QT_QPA_PLATFORMS
     PLUGIN_TYPE platforms
     SOURCES
         main.mm
@@ -89,6 +92,11 @@ qt_internal_add_resource(QCocoaIntegrationPlugin "qcocoaresources"
     FILES
         ${qcocoaresources_resource_files}
 )
+
+if(CMAKE_OSX_DEPLOYMENT_TARGET VERSION_GREATER_EQUAL 15.0)
+    message(FATAL_ERROR "QCocoaScreen uses APIs removed in 15.0. Please specify a
+        CMAKE_OSX_DEPLOYMENT_TARGET of 14.0 or lower")
+endif()
 
 ## Scopes:
 #####################################################################

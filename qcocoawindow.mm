@@ -24,6 +24,7 @@
 #include <qpa/qplatformscreen.h>
 #include <QtGui/private/qcoregraphics_p.h>
 #include <QtGui/private/qhighdpiscaling_p.h>
+#include <QtGui/private/qmetallayer_p.h>
 
 #include <QDebug>
 
@@ -131,6 +132,15 @@ void QCocoaWindow::initialize()
 
         setMask(QHighDpi::toNativeLocalRegion(window()->mask(), window()));
 
+        m_safeAreaInsetsObserver = QMacKeyValueObserver(
+            m_view, @"safeAreaInsets", [this] {
+                // Defer to next runloop pass, so that any changes to the
+                // margins during resizing have settled down.
+                QMetaObject::invokeMethod(this, [this]{
+                    updateSafeAreaMarginsIfNeeded();
+                }, Qt::QueuedConnection);
+            }, NSKeyValueObservingOptionNew);
+
     } else {
         // Pick up essential foreign window state
         QPlatformWindow::setGeometry(QRectF::fromCGRect(m_view.frame).toRect());
@@ -150,6 +160,8 @@ QCocoaWindow::~QCocoaWindow()
     QMacAutoReleasePool pool;
     [m_nsWindow makeFirstResponder:nil];
     [m_nsWindow setContentView:nil];
+
+    m_safeAreaInsetsObserver = {};
 
     // Remove from superview only if we have a Qt window parent,
     // as we don't want to affect window container foreign windows.
@@ -178,11 +190,25 @@ QCocoaWindow::~QCocoaWindow()
 
     [m_view release];
     [m_nsWindow closeAndRelease];
+
+    // Disposing of the view and window should have resulted in an
+    // expose event with isExposed=false, but just in case we try
+    // to stop the display link here as well.
+    static_cast<QCocoaScreen *>(screen())->maybeStopDisplayLink();
 }
 
 QSurfaceFormat QCocoaWindow::format() const
 {
-    return window()->requestedFormat();
+    auto format = window()->requestedFormat();
+    if (auto *view = qnsview_cast(m_view); view.colorSpace) {
+        auto colorSpace = QColorSpace::fromIccProfile(QByteArray::fromNSData(view.colorSpace.ICCProfileData));
+        if (!colorSpace.isValid()) {
+            qCWarning(lcQpaWindow) << "Failed to parse ICC profile for" << view.colorSpace
+                                   << "with ICC data" << view.colorSpace.ICCProfileData;
+        }
+        format.setColorSpace(colorSpace);
+    }
+    return format;
 }
 
 void QCocoaWindow::setGeometry(const QRect &rectIn)
@@ -199,8 +225,6 @@ void QCocoaWindow::setGeometry(const QRect &rectIn)
         const QMargins margins = frameMargins();
         rect.moveTopLeft(rect.topLeft() + QPoint(margins.left(), margins.top()));
     }
-    if (geometry() == rect)
-        return;
 
     setCocoaGeometry(rect);
 }
@@ -283,6 +307,62 @@ void QCocoaWindow::setCocoaGeometry(const QRect &rect)
     }
 
     // will call QPlatformWindow::setGeometry(rect) during resize confirmation (see qnsview.mm)
+}
+
+QMargins QCocoaWindow::safeAreaMargins() const
+{
+    // The safe area of the view reflects the area not covered by navigation
+    // bars, tab bars, toolbars, and other ancestor views that might obscure
+    // the current view (by setting additionalSafeAreaInsets). If the window
+    // uses NSWindowStyleMaskFullSizeContentView this also includes the area
+    // of the view covered by the title bar.
+    QMarginsF viewSafeAreaMargins = {
+        m_view.safeAreaInsets.left,
+        m_view.safeAreaInsets.top,
+        m_view.safeAreaInsets.right,
+        m_view.safeAreaInsets.bottom
+    };
+
+    // The screen's safe area insets represent the distances from the screen's
+    // edges at which content isn't obscured. The view's safe area margins do
+    // not include the screen's insets automatically, so we need to manually
+    // merge them.
+    auto screenRect = m_view.window.screen.frame;
+    auto screenInsets = m_view.window.screen.safeAreaInsets;
+    auto screenRelativeViewBounds = QCocoaScreen::mapFromNative(
+        [m_view.window convertRectToScreen:
+            [m_view convertRect:m_view.bounds toView:nil]]
+    );
+
+    // The margins are relative to the screen the window is on.
+    // Note that we do not want represent the area outside of the
+    // screen as being outside of the safe area.
+    QMarginsF screenSafeAreaMargins = {
+        screenInsets.left ?
+            qMax(0.0f, screenInsets.left - screenRelativeViewBounds.left())
+            : 0.0f,
+        screenInsets.top ?
+            qMax(0.0f, screenInsets.top - screenRelativeViewBounds.top())
+            : 0.0f,
+        screenInsets.right ?
+            qMax(0.0f, screenInsets.right
+                - (screenRect.size.width - screenRelativeViewBounds.right()))
+            : 0.0f,
+        screenInsets.bottom ?
+            qMax(0.0f, screenInsets.bottom
+                - (screenRect.size.height - screenRelativeViewBounds.bottom()))
+            : 0.0f
+    };
+
+    return (screenSafeAreaMargins | viewSafeAreaMargins).toMargins();
+}
+
+void QCocoaWindow::updateSafeAreaMarginsIfNeeded()
+{
+    if (safeAreaMargins() != m_lastReportedSafeAreaMargins) {
+        m_lastReportedSafeAreaMargins = safeAreaMargins();
+        QWindowSystemInterface::handleSafeAreaMarginsChanged(window());
+    }
 }
 
 bool QCocoaWindow::startSystemMove()
@@ -414,14 +494,10 @@ void QCocoaWindow::setVisible(bool visible)
     } else {
         // Window not visible, hide it
         if (isContentView()) {
-            if (eventDispatcher()->hasModalSession()) {
+            if (eventDispatcher()->hasModalSession())
                 eventDispatcher()->endModalSession(window());
-            } else {
-                if ([m_view.window isSheet]) {
-                    Q_ASSERT_X(parentCocoaWindow, "QCocoaWindow", "Window modal dialog has no transient parent.");
-                    [parentCocoaWindow->nativeWindow() endSheet:m_view.window];
-                }
-            }
+            else if ([m_view.window isSheet])
+                [m_view.window.sheetParent endSheet:m_view.window];
 
             // Note: We do not guard the order out by checking NSWindow.visible, as AppKit will
             // in some cases, such as when hiding the application, order out and make a window
@@ -514,7 +590,7 @@ NSInteger QCocoaWindow::windowLevel(Qt::WindowFlags flags)
         auto *nsWindow = transientCocoaWindow->nativeWindow();
 
         // We only upgrade the window level for "special" windows, to work
-        // around Qt Designer parenting the designer windows to the widget
+        // around Qt Widgets Designer parenting the designer windows to the widget
         // palette window (QTBUG-31779). This should be fixed in designer.
         if (type != Qt::Window)
             windowLevel = qMax(windowLevel, nsWindow.level);
@@ -570,11 +646,16 @@ NSUInteger QCocoaWindow::windowStyleMask(Qt::WindowFlags flags)
     if (m_drawContentBorderGradient)
         styleMask |= NSWindowStyleMaskTexturedBackground;
 
-    // Don't wipe existing states
-    if (m_view.window.styleMask & NSWindowStyleMaskFullScreen)
-        styleMask |= NSWindowStyleMaskFullScreen;
-    if (m_view.window.styleMask & NSWindowStyleMaskFullSizeContentView)
+    if (flags & Qt::ExpandedClientAreaHint)
         styleMask |= NSWindowStyleMaskFullSizeContentView;
+
+    // Don't wipe existing states for style flags we don't control here
+    styleMask |= (m_view.window.styleMask & (
+          NSWindowStyleMaskFullScreen
+        | NSWindowStyleMaskUnifiedTitleAndToolbar
+        | NSWindowStyleMaskDocModalWindow
+        | NSWindowStyleMaskNonactivatingPanel
+        | NSWindowStyleMaskHUDWindow));
 
     return styleMask;
 }
@@ -686,6 +767,9 @@ void QCocoaWindow::setWindowFlags(Qt::WindowFlags flags)
     bool ignoreMouse = flags & Qt::WindowTransparentForInput;
     if (m_view.window.ignoresMouseEvents != ignoreMouse)
         m_view.window.ignoresMouseEvents = ignoreMouse;
+
+    m_view.window.titlebarAppearsTransparent = (flags & Qt::NoTitleBarBackgroundHint)
+        || (m_view.window.styleMask & QT_IGNORE_DEPRECATIONS(NSWindowStyleMaskTexturedBackground));
 }
 
 // ----------------------- Window state -----------------------
@@ -1236,8 +1320,26 @@ void QCocoaWindow::windowDidResize()
         handleWindowStateChanged();
 }
 
+void QCocoaWindow::windowWillStartLiveResize()
+{
+    // Track live resizing for all windows, including
+    // child windows, so we know if it's safe to update
+    // the window unthrottled outside of the main thread.
+    m_inLiveResize = true;
+}
+
+bool QCocoaWindow::allowsIndependentThreadedRendering() const
+{
+    // Use member variable to track this instead of reflecting
+    // NSView.inLiveResize directly, so it can be called from
+    // non-main threads.
+    return !m_inLiveResize;
+}
+
 void QCocoaWindow::windowDidEndLiveResize()
 {
+    m_inLiveResize = false;
+
     if (!isContentView())
         return;
 
@@ -1406,18 +1508,6 @@ bool QCocoaWindow::windowShouldClose()
 
 void QCocoaWindow::handleGeometryChange()
 {
-    // Prevent geometry change during initialization, as that will result
-    // in a resize event, and Qt expects those to come after the show event.
-    // FIXME: Remove once we've clarified the Qt behavior for this.
-    if (!m_initialized)
-        return;
-
-    // It can happen that the current NSWindow is nil (if we are changing styleMask
-    // from/to borderless, and the content view is being re-parented), which results
-    // in invalid coordinates.
-    if (m_inSetStyleMask && !m_view.window)
-        return;
-
     QRect newGeometry;
     if (isContentView() && !isEmbedded()) {
         // Content views are positioned at (0, 0) in the window, so we resolve via the window
@@ -1433,7 +1523,28 @@ void QCocoaWindow::handleGeometryChange()
     qCDebug(lcQpaWindow) << "QCocoaWindow::handleGeometryChange" << window()
                                << "current" << geometry() << "new" << newGeometry;
 
+    // It can happen that the current NSWindow is nil (if we are changing styleMask
+    // from/to borderless, and the content view is being re-parented), which results
+    // in invalid coordinates.
+    if (m_inSetStyleMask && !m_view.window) {
+        qCDebug(lcQpaWindow) << "Lacking window during style mask update, ignoring geometry change";
+        return;
+    }
+
+    // Prevent geometry change during initialization, as that will result
+    // in a resize event, and Qt expects those to come after the show event.
+    // FIXME: Remove once we've clarified the Qt behavior for this.
+    if (!m_initialized) {
+        // But update the QPlatformWindow reality
+        QPlatformWindow::setGeometry(newGeometry);
+        qCDebug(lcQpaWindow) << "Window still initializing, skipping event";
+        return;
+    }
+
     QWindowSystemInterface::handleGeometryChange(window(), newGeometry);
+
+    // Changing the window geometry may affect the safe area margins
+    updateSafeAreaMarginsIfNeeded();
 
     // Guard against processing window system events during QWindow::setGeometry
     // calls, which Qt and Qt applications do not expect.
@@ -1464,6 +1575,9 @@ void QCocoaWindow::handleExposeEvent(const QRegion &region)
 
     qCDebug(lcQpaDrawing) << "QCocoaWindow::handleExposeEvent" << window() << region << "isExposed" << isExposed();
     QWindowSystemInterface::handleExposeEvent<QWindowSystemInterface::SynchronousDelivery>(window(), region);
+
+    if (!isExposed())
+        static_cast<QCocoaScreen *>(screen())->maybeStopDisplayLink();
 }
 
 // --------------------------------------------------------------------------
@@ -1617,6 +1731,23 @@ bool QCocoaWindow::updatesWithDisplayLink() const
 void QCocoaWindow::deliverUpdateRequest()
 {
     qCDebug(lcQpaDrawing) << "Delivering update request to" << window();
+
+    if (auto *qtMetalLayer = qt_objc_cast<QMetalLayer*>(m_view.layer)) {
+        // We attempt a read lock here, so that the animation/render thread is
+        // prioritized lower than the main thread's displayLayer processing.
+        // Without this the two threads might fight over the next drawable,
+        // starving the main thread's presentation of the resized layer.
+        if (!qtMetalLayer.displayLock.tryLockForRead()) {
+            qCDebug(lcQpaDrawing) << "Deferring update request"
+                << "due to" << qtMetalLayer << "needing display";
+            return;
+        }
+
+        // But we don't hold the lock, as the update request can recurse
+        // back into setNeedsDisplay, which would deadlock.
+        qtMetalLayer.displayLock.unlock();
+    }
+
     QPlatformWindow::deliverUpdateRequest();
 }
 
@@ -1663,7 +1794,7 @@ void QCocoaWindow::setupPopupMonitor()
                                                 | NSEventMaskMouseMoved;
         s_globalMouseMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:mouseButtonMask
                                         handler:^(NSEvent *e){
-            if (!QGuiApplicationPrivate::instance()->popupActive()) {
+            if (!QGuiApplicationPrivate::instance()->activePopupWindow()) {
                 removePopupMonitor();
                 return;
             }
@@ -1925,8 +2056,8 @@ void QCocoaWindow::applyContentBorderThickness(NSWindow *window)
 
     if (!m_drawContentBorderGradient) {
         window.styleMask = window.styleMask & ~NSWindowStyleMaskTexturedBackground;
+        setWindowFlags(QPlatformWindow::window()->flags());
         [window.contentView.superview setNeedsDisplay:YES];
-        window.titlebarAppearsTransparent = NO;
         return;
     }
 
@@ -1951,7 +2082,7 @@ void QCocoaWindow::applyContentBorderThickness(NSWindow *window)
     int effectiveBottomContentBorderThickness = 0;
 
     [window setStyleMask:[window styleMask] | NSWindowStyleMaskTexturedBackground];
-    window.titlebarAppearsTransparent = YES;
+    setWindowFlags(QPlatformWindow::window()->flags());
 
     // Setting titlebarAppearsTransparent to YES means that the border thickness has to account
     // for the title bar height as well, otherwise sheets will not be presented at the correct

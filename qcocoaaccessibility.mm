@@ -36,6 +36,23 @@ void QCocoaAccessibility::notifyAccessibilityUpdate(QAccessibleEvent *event)
     }
 
     switch (event->type()) {
+    case QAccessible::Announcement: {
+        auto *announcementEvent = static_cast<QAccessibleAnnouncementEvent *>(event);
+        auto priorityLevel = (announcementEvent->politeness() == QAccessible::AnnouncementPoliteness::Assertive)
+                ? NSAccessibilityPriorityHigh
+                : NSAccessibilityPriorityMedium;
+        NSDictionary *announcementInfo = @{
+            NSAccessibilityPriorityKey: [NSNumber numberWithInt:priorityLevel],
+            NSAccessibilityAnnouncementKey: announcementEvent->message().toNSString()
+        };
+        // post event for application element, as the comment for
+        // NSAccessibilityAnnouncementRequestedNotification in the
+        // NSAccessibilityConstants.h header says
+        NSAccessibilityPostNotificationWithUserInfo(NSApp,
+                                                    NSAccessibilityAnnouncementRequestedNotification,
+                                                    announcementInfo);
+        break;
+    }
     case QAccessible::Focus: {
         NSAccessibilityPostNotification(element, NSAccessibilityFocusedUIElementChangedNotification);
         break;
@@ -140,6 +157,7 @@ static void populateRoleMap()
     roleMap[QAccessible::ComplementaryContent] = NSAccessibilityGroupRole;
     roleMap[QAccessible::Graphic] = NSAccessibilityImageRole;
     roleMap[QAccessible::Tree] = NSAccessibilityOutlineRole;
+    roleMap[QAccessible::BlockQuote] = NSAccessibilityGroupRole;
 }
 
 /*

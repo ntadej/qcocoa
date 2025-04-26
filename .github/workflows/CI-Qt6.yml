@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  QT_VERSION: 6.7.3
+  QT_VERSION: 6.9.0
 
 jobs:
   build:
@@ -84,7 +84,8 @@ jobs:
             -G Ninja \
             -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
             -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+            -DQT_GENERATE_SBOM=OFF
           ninja
           DESTDIR=../install ninja install
 
