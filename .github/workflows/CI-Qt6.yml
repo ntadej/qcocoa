@@ -24,19 +24,19 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  QT_VERSION: 6.9.1
+  QT_VERSION: 6.10.0
 
 jobs:
   build:
     name: Build qcocoa
-    runs-on: macos-14
+    runs-on: macos-15
     strategy:
       matrix:
         type: [shared, static]
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: source
           fetch-depth: 0
@@ -104,7 +104,7 @@ jobs:
   release:
     name: Release qcocoa
     if: github.ref_type == 'tag'
-    runs-on: macos-14
+    runs-on: macos-15
     strategy:
       matrix:
         type: [shared, static]
@@ -114,7 +114,7 @@ jobs:
 
     steps:
     - name: Download artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v5
       with:
         name: qcocoa_${{ matrix.type }}
 
