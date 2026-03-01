@@ -96,7 +96,7 @@ jobs:
           popd
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qcocoa_${{ matrix.type }}
           path: qcocoa.tar.bz2
