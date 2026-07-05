@@ -1,5 +1,6 @@
 // Copyright (C) 2016 The Qt Company Ltd.
 // SPDX-License-Identifier: LicenseRef-Qt-Commercial OR LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
+// Qt-Security score:significant reason:default
 
 #include <AppKit/AppKit.h>
 
@@ -19,6 +20,10 @@ static inline QByteArray getGlString(GLenum param)
         return QByteArray(reinterpret_cast<const char*>(s));
     return QByteArray();
 }
+
+#if defined(Q_PROCESSOR_X86_64)
+QT_DECLARE_NAMESPACED_OBJC_INTERFACE(QNoopDisplayDelegate, NSObject<CALayerDelegate>)
+#endif
 
 QT_BEGIN_NAMESPACE
 
@@ -264,11 +269,26 @@ void QCocoaGLContext::updateSurfaceFormat()
         return value;
     };
 
-    int colorSize = pixelFormatAttribute(NSOpenGLPFAColorSize);
-    colorSize /= 4; // The attribute includes the alpha component
-    m_format.setRedBufferSize(colorSize);
-    m_format.setGreenBufferSize(colorSize);
-    m_format.setBlueBufferSize(colorSize);
+    const auto pixelFormatAlphaSize = pixelFormatAttribute(NSOpenGLPFAAlphaSize);
+
+    // Resolve color channel bits from GL if possible, as we get individual channels,
+    // falling back to NSOpenGLPFAColorSize, where we have to assume uniform channels.
+    if (pixelFormatAttribute(NSOpenGLPFAOpenGLProfile) == NSOpenGLProfileVersionLegacy) {
+        GLint redBits, greenBits, blueBits;
+        glGetIntegerv(GL_RED_BITS, &redBits);
+        glGetIntegerv(GL_GREEN_BITS, &greenBits);
+        glGetIntegerv(GL_BLUE_BITS, &blueBits);
+        m_format.setRedBufferSize(redBits);
+        m_format.setGreenBufferSize(greenBits);
+        m_format.setBlueBufferSize(blueBits);
+    } else {
+        int colorSize = pixelFormatAttribute(NSOpenGLPFAColorSize);
+        colorSize -= pixelFormatAlphaSize; // The attribute includes the alpha component
+        colorSize /= 3;
+        m_format.setRedBufferSize(colorSize);
+        m_format.setGreenBufferSize(colorSize);
+        m_format.setBlueBufferSize(colorSize);
+    }
 
     // Surfaces on macOS always have an alpha channel, but unless the user requested
     // one via setAlphaBufferSize(), which triggered setting NSOpenGLCPSurfaceOpacity
@@ -276,7 +296,7 @@ void QCocoaGLContext::updateSurfaceFormat()
     // size, as that will make the user believe the alpha channel can be used for
     // something useful, when in reality it can't, due to the surface being opaque.
     if (m_format.alphaBufferSize() > 0)
-        m_format.setAlphaBufferSize(pixelFormatAttribute(NSOpenGLPFAAlphaSize));
+        m_format.setAlphaBufferSize(pixelFormatAlphaSize);
 
     m_format.setDepthBufferSize(pixelFormatAttribute(NSOpenGLPFADepthSize));
     m_format.setStencilBufferSize(pixelFormatAttribute(NSOpenGLPFAStencilSize));
@@ -288,6 +308,9 @@ void QCocoaGLContext::updateSurfaceFormat()
         m_format.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
     else
         m_format.setSwapBehavior(QSurfaceFormat::SingleBuffer);
+
+    m_isSoftwareContext = (pixelFormatAttribute(NSOpenGLPFARendererID)
+        & kCGLRendererIDMatchingMask) == kCGLRendererGenericFloatID;
 
     // ------------------- Query the context -------------------
 
@@ -447,7 +470,34 @@ void QCocoaGLContext::update()
 
     QMutexLocker locker(&s_reentrancyMutex);
     qCInfo(lcQpaOpenGLContext) << "Updating" << m_context << "for" << QT_IGNORE_DEPRECATIONS(m_context.view);
+
+    // On macOS 26 on Intel machines, when using the software GL backend,
+    // -[NSOpenGLContext update] triggers a display of the GL layer, and
+    // then crashes in glClear during the display.
+#if defined(Q_PROCESSOR_X86_64)
+    static bool tahoeOrAbove = QOperatingSystemVersion::current() >= QOperatingSystemVersion::MacOSTahoe;
+    auto *layer = QT_IGNORE_DEPRECATIONS(m_context.view.layer);
+    if (tahoeOrAbove && isSoftwareContext() && layer.needsDisplay) {
+        static QNoopDisplayDelegate *noopDisplayDelegate = [QNoopDisplayDelegate new];
+        qCDebug(lcQpaOpenGLContext) << "Layer needs display. Installing noop display delegate" << noopDisplayDelegate;
+        auto *orignalDelegate = layer.delegate;
+        layer.delegate = noopDisplayDelegate;
+
+        [m_context update];
+
+        qCDebug(lcQpaOpenGLContext) << "Restoring original layer delegate" << orignalDelegate;
+        layer.delegate = orignalDelegate;
+        [layer setNeedsDisplay];
+
+        return;
+    }
+#endif
+
+    GLint previousFBO;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     [m_context update];
+    glBindFramebuffer(GL_FRAMEBUFFER, previousFBO);
 }
 
 void QCocoaGLContext::swapBuffers(QPlatformSurface *surface)
@@ -512,6 +562,11 @@ bool QCocoaGLContext::isSharing() const
     return m_shareContext != nil;
 }
 
+bool QCocoaGLContext::isSoftwareContext() const
+{
+    return m_isSoftwareContext;
+}
+
 NSOpenGLContext *QCocoaGLContext::nativeContext() const
 {
     return m_context;
@@ -539,3 +594,12 @@ QDebug operator<<(QDebug debug, const QCocoaGLContext *context)
 #endif // !QT_NO_DEBUG_STREAM
 
 QT_END_NAMESPACE
+
+#if defined(Q_PROCESSOR_X86_64)
+@implementation QNoopDisplayDelegate
+- (void)displayLayer:(CALayer *)layer
+{
+    qCInfo(lcQpaOpenGLContext) << "Ignoring display of" << layer << "during [NSOpenGLContext update]";
+}
+@end
+#endif

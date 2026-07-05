@@ -1,5 +1,6 @@
 // Copyright (C) 2020 The Qt Company Ltd.
 // SPDX-License-Identifier: LicenseRef-Qt-Commercial OR LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
+// Qt-Security score:significant reason:default
 
 // This file is included from qnsview.mm, and only used to organize the code
 
@@ -165,6 +166,11 @@ static const QPointingDevice *tabletToolInstance(NSEvent *theEvent)
         pointerType = QPointingDevice::PointerType::Eraser;
         break;
     }
+
+    // Assume it's a stylus device if the pointer type is pen
+    if (device == QInputDevice::DeviceType::Unknown
+        && pointerType == QPointingDevice::PointerType::Pen)
+        device = QInputDevice::DeviceType::Stylus;
 
     const auto uniqueID = QPointingDeviceUniqueId::fromNumericId(uid);
     auto windowSystemId = theEvent.deviceID;
