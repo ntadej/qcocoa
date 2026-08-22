@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(qcocoa
-    VERSION "6.11.1.0"
+    VERSION "6.11.2.0"
     LANGUAGES CXX C
 )
 
@@ -69,8 +69,6 @@ qt_internal_add_plugin(QCocoaIntegrationPlugin
         qcocoafiledialoghelper.h qcocoafiledialoghelper.mm
         qcocoafontdialoghelper.h qcocoafontdialoghelper.mm
         qcocoamessagedialog.h qcocoamessagedialog.mm
-    DEFINES
-        QT_NO_FOREACH
     PRECOMPILED_HEADER
         $<$<COMPILE_LANGUAGE:OBJCXX>:qcocoa_plugin_pch.h>
     LIBRARIES
